@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <!-- ポップアップUI。JSONを貼り付けて実行するだけのシンプルな画面 -->
+  <title>カイポケ自動入力</title>
+  <style>
+    /* 拡張機能ポップアップの最小限のスタイル（外部CSSは読み込まない） */
+    body {
+      font-family: "Hiragino Sans", "Meiryo", sans-serif;
+      width: 380px;
+      margin: 0;
+      padding: 12px;
+      font-size: 13px;
+      color: #222;
+    }
+    h1 {
+      font-size: 15px;
+      margin: 0 0 8px;
+    }
+    .note {
+      background: #fff8e1;
+      border: 1px solid #ffe082;
+      border-radius: 6px;
+      padding: 8px;
+      margin-bottom: 10px;
+      line-height: 1.5;
+      font-size: 12px;
+    }
+    textarea {
+      width: 100%;
+      height: 220px;
+      box-sizing: border-box;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      resize: vertical;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    button {
+      flex: 1;
+      padding: 8px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #f5f5f5;
+    }
+    button.primary {
+      background: #1976d2;
+      color: #fff;
+      border-color: #1565c0;
+      font-weight: bold;
+    }
+    #status {
+      margin-top: 10px;
+      min-height: 18px;
+      font-size: 12px;
+      white-space: pre-wrap;
+    }
+    .status-error { color: #c62828; }
+    .status-ok { color: #2e7d32; }
+    .status-info { color: #555; }
+  </style>
+</head>
+<body>
+  <h1>カイポケ 訪問介護計画書 自動入力</h1>
+
+  <!-- 免責・注意事項。最終登録は必ず人間が行うことを明記 -->
+  <div class="note">
+    ⚠️ 自動入力は「下書き」までを行います。<br>
+    入力後は<strong>必ず目視で内容を確認</strong>し、問題がなければ
+    <strong>ご自身でカイポケの「登録（保存）」を押してください</strong>。<br>
+    自動化による誤登録は免責事項です。
+  </div>
+
+  <!-- JSONデータの貼り付け欄。basicInfo と services を持つ階層構造 -->
+  <label for="jsonInput">JSONデータ（basicInfo / services）</label>
+  <textarea id="jsonInput" placeholder='{&#10;  "basicInfo": { ... },&#10;  "services": [ ... ]&#10;}'></textarea>
+
+  <div class="row">
+    <button id="sampleBtn" type="button">サンプルを挿入</button>
+    <button id="runBtn" class="primary" type="button">自動入力を実行</button>
+  </div>
+
+  <div id="status" class="status-info"></div>
+
+  <!-- 外部スクリプトは読み込まず、popup.js のみ（CSP準拠） -->
+  <script src="popup.js"></script>
+</body>
+</html>

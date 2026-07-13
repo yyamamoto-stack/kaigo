@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "カイポケ 訪問介護計画書 自動入力ツール",
+  "version": "1.0.0",
+  "description": "カイポケの「訪問介護計画書 新規追加」画面へ、JSONデータをDOM操作のみで自動入力する社内ツール（内部API通信なし・人間操作を模倣した遅延つき）。",
+
+  "//注意": "権限はカイポケのURLのみに限定。<all_urls>やワイルドカードは使用禁止（claude.md 2-3参照）。",
+
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+
+  "host_permissions": [
+    "https://*.kaipoke.biz/*"
+  ],
+
+  "action": {
+    "default_title": "カイポケ自動入力",
+    "default_popup": "popup.html"
+  },
+
+  "content_scripts": [
+    {
+      "//説明": "カイポケのページに content.js を注入する。matches はカイポケドメインのみ。",
+      "matches": [
+        "https://*.kaipoke.biz/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
