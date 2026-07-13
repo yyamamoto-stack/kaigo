@@ -1,5 +1,5 @@
-// content.js
-// カイポケ「訪問介護計画書 新規追加」画面に対する自動入力のコアロジック。
+// content.js（v2：実画面対応）
+// カイポケ「訪問介護計画書 新規追加」＋「サービス設定」ポップアップの自動入力コアロジック。
 //
 // 【重要・コンプライアンス】（詳細は claude.md）
 //   - 内部APIへの直接通信（fetch/XHR等）は一切行わない。純粋なDOM操作のみ。
@@ -7,144 +7,142 @@
 //   - waitForElement は必ずタイムアウト（既定10秒）を持ち、失敗時は安全停止しユーザーに通知する。
 //   - セレクタはロジックにハードコードせず、下記 SELECTORS に集約する。
 //
-// ※カイポケの実際のDOM構造は環境・バージョンにより異なります。
-//   下記 SELECTORS は「保守担当（システム管理者）」が実画面に合わせて調整する前提の
-//   プレースホルダです（README「保守」参照）。
+// 【構成】このスクリプトはカイポケ全ページに注入され、URLで「役割」を判定して振る舞う。
+//   - メイン画面（訪問介護計画書 新規追加）: 基本情報／援助目標／サービス追加ボタン／援助内容タブ／説明欄
+//   - サービス設定ポップアップ（.../plan_document/MEM093104.do）: サービス設定フォーム
+//   親子ウィンドウの順序制御は background.js が担当する。
+//
+// ※実際のDOM（id/class）は環境・カイポケのバージョンで異なります。SELECTORS は
+//   保守担当（システム部）が DevTools で実画面に合わせて調整する前提のプレースホルダです。
 
 // =============================================================
 // SELECTORS — セレクタ集約（ハードコード禁止：変更はここだけで完結させる）
 // =============================================================
 const SELECTORS = {
-  // --- ① 基本情報エリア ---
+  // --- URL 判定（役割の切り替えに使用） ---
+  url: {
+    servicePopup: 'plan_document/MEM',   // サービス設定ポップアップURLの部分一致（MEM093104.do 等）
+  },
+
+  // --- ① 基本情報（メイン画面 上部）。日付は和暦の 元号/年/月/日 select ---
   basicInfo: {
-    createdDate:     '#plan-created-date',        // 作成年月日
-    author:          '#plan-author',              // 計画作成者
-    planPeriodFrom:  '#plan-period-from',         // 計画期間（開始）
-    planPeriodTo:    '#plan-period-to',           // 計画期間（終了）
-    goal:            '#plan-goal',                // 援助目標（textarea想定）
+    createdDate: { era: '#createdDate-era', year: '#createdDate-year', month: '#createdDate-month', day: '#createdDate-day' },
+    insurancePeriod: '#insurance-period',   // 被保険証適用期間（select）
+    author: '#plan-author',                 // 計画作成者氏名（text）
+    careOffice: '#care-office',             // 居宅介護支援事業所（select）
+    careManager: '#care-manager',           // 担当ケアマネージャー（select）
   },
 
-  // --- ② サービス「新規追加」ボタン ---
-  addServiceButton: '#btn-add-service',
-
-  // --- ③ サービス追加モーダル ---
-  modal: {
-    root:        '#service-modal',                // モーダルのルート要素（出現待機の対象）
-    serviceType: '#service-type',                 // サービス種別（select想定）
-    dayOfWeek:   '#service-day',                  // 曜日（select想定）
-    startTime:   '#service-start-time',           // 開始時刻
-    endTime:     '#service-end-time',             // 終了時刻
-    saveButton:  '#service-modal-save',           // モーダルの保存ボタン
+  // --- ② 援助目標（メイン画面 中部） ---
+  goals: {
+    issues: '#goal-issues',                 // 解決すべき課題（textarea）
+    longTerm: '#goal-long-term',            // 長期目標（textarea）
+    shortTerm: '#goal-short-term',          // 短期目標（textarea）
+    personFamilyHope: '#goal-hope',         // 本人・家族の希望（textarea）
+    notes: '#goal-notes',                   // 留意点（textarea）
   },
 
-  // --- ⑥ 保存後にメイン画面へ動的生成されるサービスタブ ---
-  // {index} は 0 始まりのサービス番号に置換して使う（buildSelector参照）。
-  serviceTab:        '#service-tab-{index}',       // 生成されたタブ（クリック対象／出現待機対象）
-  serviceTabContent: '#service-tab-content-{index}', // タブの中身（コンテンツ領域）
+  // --- ③ サービスの保険区分タブ＆「新規追加する」ボタン（メイン画面） ---
+  serviceArea: {
+    tabInsurance: '#tab-hokennai',          // 「保険内」タブ
+    tabOutside: '#tab-hokengai',            // 「保険外」タブ
+    addButton: '#btn-add-service',          // 「新規追加する」ボタン（ポップアップを開く）
+  },
 
-  // --- ⑦ タブ内：援助内容の入力欄 ---
-  // タブコンテンツ領域(root)を起点に相対探索する想定。
-  supportContent:    '.support-content-input',     // 援助内容（textarea想定）
+  // --- ④ サービス設定ポップアップ（別ウィンドウ MEM093104.do） ---
+  popup: {
+    root: '#service-form',                  // フォームのルート（出現待機の対象）
+    insuranceInside: 'input[name="hokenKubun"][value="1"]',  // 保険区分＝保険内（radio）
+    insuranceOutside: 'input[name="hokenKubun"][value="2"]', // 保険区分＝保険外（radio）
+    serviceType: '#service-type',           // サービス種類（select）
+    serviceOffice: '#service-office',       // サービス事業所（select）
+    serviceContent: '#service-content',     // サービス内容（textarea）
+    units: '#service-units',                // 単位数（text）
+    startHour: '#start-hour', startMin: '#start-min',        // 開始 時/分（select）
+    endHour: '#end-hour', endMin: '#end-min',                // 終了 時/分（select）
+    // 提供日：毎週/第N のラジオと曜日チェックボックス
+    cycleWeekly: 'input[name="teikyoCycle"][value="weekly"]',
+    cycleNth: 'input[name="teikyoCycle"][value="nth"]',
+    weekday: (d) => `input[name="youbi"][value="${d}"]`,     // 曜日チェック（値は 月/火/…）
+    saveButton: '#btn-service-save',        // 「保存する」ボタン
+  },
+
+  // --- ⑤ 援助内容（メイン画面：サービスタブと繰り返し行） ---
+  support: {
+    tab: '#service-tab-{index}',                    // サービスN タブ（{index}は0始まり）
+    tabContent: '#service-tab-content-{index}',     // タブの中身（root）
+    rows: '.support-row',                           // 援助内容の行（root配下）
+    addRowButton: '.support-add-row',               // 行追加ボタン（不足時に使用）
+    // 各行内のフィールド（行要素を起点に相対探索）
+    rowCategory: '.support-category',               // サービス項目カテゴリ（身体/生活 select）
+    rowItem: '.support-item',                       // サービス項目（select）
+    rowContent: '.support-content',                 // 具体的内容（textarea）
+    rowTime: '.support-time',                       // 所要時間（分・text）
+    rowNotes: '.support-notes',                     // 留意事項（textarea）
+  },
+
+  // --- ⑥ 説明欄（メイン画面 下部）。作成状態・登録ボタンは自動化では触らない ---
+  footer: {
+    explainDate: { era: '#explainDate-era', year: '#explainDate-year', month: '#explainDate-month', day: '#explainDate-day' },
+    explainer: '#explainer',                // 説明者（text）
+  },
 };
 
-// {index} 等のプレースホルダをセレクタに埋め込むヘルパー
+// {index} 等のプレースホルダをセレクタに埋め込む
 function buildSelector(template, params = {}) {
   return template.replace(/\{(\w+)\}/g, (_, key) => String(params[key]));
 }
 
 // =============================================================
-// コアスキル（skills.md の実装をそのまま利用）
+// コアスキル（skills.md 準拠）
 // =============================================================
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-/** 指定ミリ秒だけ待機する */
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+/** 500〜1500ms のランダム待機（人間の操作揺らぎを模倣）。全アクション間に必ず挟む。 */
+function humanSleep() { return sleep(500 + Math.floor(Math.random() * 1001)); }
 
-/**
- * 500〜1500ms のランダム待機（人間の操作揺らぎを模倣）。
- * 【安全規約】すべてのアクション間に必ず挟む。
- */
-function humanSleep() {
-  const ms = 500 + Math.floor(Math.random() * 1001); // 500〜1500
-  return sleep(ms);
-}
-
-/**
- * 要素の出現待機。必ずタイムアウト（既定10秒）を持ち、超過時は例外で安全停止させる。
- * @param {string} selector CSSセレクタ
- * @param {object} [options] {timeout, interval, root, visible}
- * @returns {Promise<Element>}
- */
+/** 要素の出現待機。必ずタイムアウト（既定10秒）を持ち、超過時は例外で安全停止。 */
 function waitForElement(selector, options = {}) {
-  const {
-    timeout = 10000,   // 【暴走防止】既定10秒でタイムアウト
-    interval = 200,
-    root = document,
-    visible = true,
-  } = options;
-
+  const { timeout = 10000, interval = 200, root = document, visible = true } = options;
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-
     const isVisible = (el) => {
       if (!visible) return true;
-      const style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
-      const rect = el.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
+      const s = window.getComputedStyle(el);
+      if (s.display === 'none' || s.visibility === 'hidden') return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
     };
-
     const tick = () => {
       const el = root.querySelector(selector);
-      if (el && isVisible(el)) {
-        resolve(el);
-        return;
-      }
+      if (el && isVisible(el)) { resolve(el); return; }
       if (Date.now() - startedAt >= timeout) {
         reject(new Error(`要素が見つかりませんでした（タイムアウト ${timeout}ms）: "${selector}"`));
         return;
       }
       setTimeout(tick, interval);
     };
-
     tick();
   });
 }
 
-/**
- * ネイティブの value セッターで値を設定し、input/change を強制発火する。
- * （React等の制御コンポーネントでも確実に反映させるため）
- */
+/** ネイティブの value セッターで値を設定し input/change を強制発火。 */
 function setNativeValue(element, value) {
-  if (!element) {
-    throw new Error('setNativeValue: 対象要素が null です。');
-  }
-  const prototype = Object.getPrototypeOf(element);
-  const valueSetter = Object.getOwnPropertyDescriptor(element, 'value')?.set;
-  const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-
-  if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
-    prototypeValueSetter.call(element, value);
-  } else if (valueSetter) {
-    valueSetter.call(element, value);
-  } else {
-    element.value = value;
-  }
+  if (!element) throw new Error('setNativeValue: 対象要素が null です。');
+  const proto = Object.getPrototypeOf(element);
+  const ownSetter = Object.getOwnPropertyDescriptor(element, 'value')?.set;
+  const protoSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+  if (protoSetter && ownSetter !== protoSetter) protoSetter.call(element, value);
+  else if (ownSetter) ownSetter.call(element, value);
+  else element.value = value;
   element.dispatchEvent(new Event('input', { bubbles: true }));
   element.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
-/**
- * 安全なクリック。null/disabled は例外で安全停止。可視化してから押下する。
- */
+/** 安全なクリック。null/disabled は例外で安全停止。可視化してから押下。 */
 function safeClick(element) {
-  if (!element) {
-    throw new Error('safeClick: クリック対象が null です。処理を停止します。');
-  }
-  if (element.disabled) {
-    throw new Error('safeClick: クリック対象が disabled 状態です。処理を停止します。');
-  }
+  if (!element) throw new Error('safeClick: クリック対象が null です。処理を停止します。');
+  if (element.disabled) throw new Error('safeClick: クリック対象が disabled 状態です。処理を停止します。');
   element.scrollIntoView({ block: 'center', inline: 'center' });
   if (typeof element.focus === 'function') element.focus();
   element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
@@ -156,199 +154,253 @@ function safeClick(element) {
 // 入力ヘルパー（待機→スリープ→入力→スリープ を一貫化）
 // =============================================================
 
-/**
- * テキスト/テキストエリアへ値を入力する（待機・スリープ・ネイティブ発火つき）。
- * value が undefined/null/'' の場合はスキップする（未指定項目を壊さない）。
- * @param {string} selector
- * @param {*} value
- * @param {object} [options] waitForElement へ渡すオプション（root等）
- */
+/** テキスト/テキストエリア入力（未指定はスキップ）。 */
 async function fillInput(selector, value, options = {}) {
   if (value === undefined || value === null || value === '') return;
-  const el = await waitForElement(selector, options); // 出現待機（タイムアウトあり）
-  await humanSleep();                                  // 人間らしい待機
-  setNativeValue(el, String(value));                  // ネイティブイベント発火で入力
-  await humanSleep();                                  // 次の操作まで待機
+  const el = await waitForElement(selector, options);
+  await humanSleep();
+  setNativeValue(el, String(value));
+  await humanSleep();
 }
 
-/**
- * select 要素で、指定の表示テキストまたは value に一致する項目を選択する。
- */
+/** select で表示テキストまたは value 一致の項目を選択（見つからなければ安全停止）。 */
 async function selectOption(selector, value, options = {}) {
   if (value === undefined || value === null || value === '') return;
   const el = await waitForElement(selector, options);
   await humanSleep();
-
-  const target = String(value);
+  const target = String(value).trim();
   let matched = null;
   for (const opt of Array.from(el.options || [])) {
-    if (opt.value === target || opt.textContent.trim() === target) {
-      matched = opt;
-      break;
+    if (opt.value === target || opt.textContent.trim() === target) { matched = opt; break; }
+  }
+  if (!matched) {
+    // 部分一致も試す（前後空白・全角括弧などの揺れ対策）
+    for (const opt of Array.from(el.options || [])) {
+      if (opt.textContent.trim().includes(target)) { matched = opt; break; }
     }
   }
   if (!matched) {
-    // 一致する選択肢が無い場合は安全停止（誤入力を避ける）
-    throw new Error(`選択肢が見つかりません: セレクタ "${selector}" に "${target}" が存在しません。`);
+    throw new Error(`選択肢が見つかりません: "${selector}" に「${target}」が存在しません（カイポケ登録値と一致していない可能性）。`);
   }
   setNativeValue(el, matched.value);
   await humanSleep();
 }
 
-// =============================================================
-// 処理フロー本体
-// =============================================================
-
-/**
- * ① 基本情報の入力
- */
-async function fillBasicInfo(basicInfo) {
-  const S = SELECTORS.basicInfo;
-  await fillInput(S.createdDate, basicInfo.createdDate);
-  await fillInput(S.author, basicInfo.author);
-  await fillInput(S.planPeriodFrom, basicInfo.planPeriodFrom);
-  await fillInput(S.planPeriodTo, basicInfo.planPeriodTo);
-  await fillInput(S.goal, basicInfo.goal);
-}
-
-/**
- * ②〜⑤ サービス1件を「新規追加」ボタン→モーダル入力→保存 で登録する。
- * （援助内容は保存後に生成されるタブへ入力するため、ここでは扱わない）
- */
-async function addServiceViaModal(service) {
-  // ② 「新規追加」ボタン押下
-  const addBtn = await waitForElement(SELECTORS.addServiceButton);
+/** ラジオボタンを選択。 */
+async function setRadio(selector, options = {}) {
+  const el = await waitForElement(selector, options);
   await humanSleep();
-  safeClick(addBtn);
-  await humanSleep();
-
-  // ③ モーダルの出現待機
-  const modalRoot = await waitForElement(SELECTORS.modal.root);
-  await humanSleep();
-
-  // ④ モーダル内へサービス情報を入力（各入力間に humanSleep が入る）
-  const M = SELECTORS.modal;
-  // モーダル内探索を確実にするため root を渡す
-  await selectOption(M.serviceType, service.serviceType, { root: modalRoot });
-  await selectOption(M.dayOfWeek, service.dayOfWeek, { root: modalRoot });
-  await fillInput(M.startTime, service.startTime, { root: modalRoot });
-  await fillInput(M.endTime, service.endTime, { root: modalRoot });
-
-  // ⑤ モーダルの保存ボタン押下
-  const saveBtn = await waitForElement(M.saveButton, { root: modalRoot });
-  await humanSleep();
-  safeClick(saveBtn);
-  await humanSleep();
-
-  // モーダルが閉じるのを待つ（消えるまで最大10秒）。閉じない場合は安全停止。
-  await waitForElementToDisappear(M.root);
+  el.checked = true;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  safeClick(el);
   await humanSleep();
 }
 
-/**
- * ⑥⑦ 保存後にメイン画面へ動的生成されたサービスタブを開き、援助内容を入力する。
- * @param {number} index 0始まりのサービス番号
- * @param {object} service
- */
-async function fillServiceTab(index, service) {
-  // ⑥ 動的タブ生成の待機
-  const tabSelector = buildSelector(SELECTORS.serviceTab, { index });
-  const tab = await waitForElement(tabSelector);
+/** チェックボックスを希望状態にする。 */
+async function setCheckbox(selector, checked, options = {}) {
+  const el = await waitForElement(selector, options);
+  if (el.checked !== !!checked) {
+    await humanSleep();
+    safeClick(el);
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
   await humanSleep();
+}
 
-  // タブをクリックして開く
+/** 和暦日付文字列（例「令和8年7月13日」）を 元号/年/月/日 の select 群に設定。 */
+async function setWarekiDate(dateSelectors, warekiStr, options = {}) {
+  if (!warekiStr) return;
+  const parsed = parseWareki(warekiStr);
+  if (!parsed) throw new Error(`和暦日付の解釈に失敗しました: "${warekiStr}"（例: 令和8年7月13日）`);
+  await selectOption(dateSelectors.era, parsed.era, options);
+  await selectOption(dateSelectors.year, parsed.year, options);
+  await selectOption(dateSelectors.month, parsed.month, options);
+  await selectOption(dateSelectors.day, parsed.day, options);
+}
+
+/** 「令和8年7月13日」→ {era:'令和', year:'8', month:'7', day:'13'} */
+function parseWareki(s) {
+  const m = String(s).match(/^\s*(明治|大正|昭和|平成|令和)\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日\s*$/);
+  if (!m) return null;
+  return { era: m[1], year: m[2], month: m[3], day: m[4] };
+}
+
+// =============================================================
+// メイン画面：各コマンドの処理
+// =============================================================
+
+/** ① 基本情報＋援助目標の入力 */
+async function handleFillBasic(basicInfo = {}) {
+  const B = SELECTORS.basicInfo;
+  await setWarekiDate(B.createdDate, basicInfo.createdDate);
+  await selectOption(B.insurancePeriod, basicInfo.insurancePeriod);
+  await fillInput(B.author, basicInfo.author);
+  await selectOption(B.careOffice, basicInfo.careOffice);
+  await selectOption(B.careManager, basicInfo.careManager);
+
+  const G = SELECTORS.goals;
+  await fillInput(G.issues, basicInfo.issues);
+  await fillInput(G.longTerm, basicInfo.longTermGoal);
+  await fillInput(G.shortTerm, basicInfo.shortTermGoal);
+  await fillInput(G.personFamilyHope, basicInfo.personFamilyHope);
+  await fillInput(G.notes, basicInfo.notes);
+}
+
+/** ②a 保険区分タブを選び「新規追加する」を押してポップアップを開く */
+async function handleOpenServiceModal(insuranceType) {
+  const A = SELECTORS.serviceArea;
+  // 保険内/保険外タブの選択
+  const tabSel = insuranceType === '保険外' ? A.tabOutside : A.tabInsurance;
+  try {
+    const tab = await waitForElement(tabSel, { timeout: 4000 });
+    await humanSleep();
+    safeClick(tab);
+    await humanSleep();
+  } catch (_) { /* タブが常時表示なら失敗しても続行 */ }
+
+  const addBtn = await waitForElement(A.addButton);
+  await humanSleep();
+  safeClick(addBtn); // ここで別ウィンドウ（ポップアップ）が開く
+  await humanSleep();
+}
+
+/** ②c 援助内容タブ（サービスindex）の繰り返し行を入力 */
+async function handleFillSupport(index, supportDetails = []) {
+  if (!supportDetails.length) return;
+
+  // タブの出現待機 → クリックして開く
+  const tab = await waitForElement(buildSelector(SELECTORS.support.tab, { index }));
+  await humanSleep();
   safeClick(tab);
   await humanSleep();
 
-  // タブコンテンツの出現待機
-  const contentSelector = buildSelector(SELECTORS.serviceTabContent, { index });
-  const content = await waitForElement(contentSelector);
+  const content = await waitForElement(buildSelector(SELECTORS.support.tabContent, { index }));
   await humanSleep();
 
-  // ⑦ タブ内の援助内容入力欄へ入力（content を起点に相対探索）
-  await fillInput(SELECTORS.supportContent, service.supportContent, { root: content });
-}
-
-/**
- * 要素が DOM から消える／非表示になるまで待機する（モーダルクローズ確認用）。
- */
-function waitForElementToDisappear(selector, options = {}) {
-  const { timeout = 10000, interval = 200, root = document } = options;
-  return new Promise((resolve, reject) => {
-    const startedAt = Date.now();
-    const tick = () => {
-      const el = root.querySelector(selector);
-      const gone =
-        !el ||
-        window.getComputedStyle(el).display === 'none' ||
-        window.getComputedStyle(el).visibility === 'hidden';
-      if (gone) {
-        resolve();
-        return;
+  // 既存行を取得し、不足分は行追加ボタンで確保
+  for (let r = 0; r < supportDetails.length; r++) {
+    let rows = content.querySelectorAll(SELECTORS.support.rows);
+    if (r >= rows.length) {
+      const addBtn = content.querySelector(SELECTORS.support.addRowButton);
+      if (!addBtn) {
+        throw new Error(`援助内容の行が不足しています（必要 ${supportDetails.length} / 現在 ${rows.length}）。行追加ボタンが見つかりません。`);
       }
-      if (Date.now() - startedAt >= timeout) {
-        reject(new Error(`要素が消えませんでした（タイムアウト ${timeout}ms）: "${selector}"`));
-        return;
-      }
-      setTimeout(tick, interval);
-    };
-    tick();
-  });
-}
+      await humanSleep();
+      safeClick(addBtn);
+      await humanSleep();
+      rows = content.querySelectorAll(SELECTORS.support.rows);
+    }
 
-/**
- * 自動入力のメインフロー。
- * @param {{basicInfo: object, services: object[]}} payload
- */
-async function runAutofill(payload) {
-  const { basicInfo, services } = payload;
+    const row = rows[r];
+    const d = supportDetails[r];
+    const S = SELECTORS.support;
 
-  // ① 基本情報の入力
-  await fillBasicInfo(basicInfo);
-  await humanSleep();
-
-  // サービスごとに ②〜⑤（モーダル登録）を実行
-  for (let i = 0; i < services.length; i++) {
-    await addServiceViaModal(services[i]);
-    await humanSleep(); // 各サービスの間にも必ず待機（連続リクエスト回避）
-  }
-
-  // 全モーダル登録後、⑥⑦（タブへの援助内容入力）を実行
-  for (let i = 0; i < services.length; i++) {
-    await fillServiceTab(i, services[i]);
+    // カテゴリ→項目の順に選択（項目はカテゴリに連動するため順序重要）
+    if (d.category) await selectOption(S.rowCategory, d.category, { root: row });
+    if (d.item) await selectOption(S.rowItem, d.item, { root: row });
+    if (d.content) await fillInput(S.rowContent, d.content, { root: row });
+    if (d.requiredTime) await fillInput(S.rowTime, d.requiredTime, { root: row });
+    if (d.notes) await fillInput(S.rowNotes, d.notes, { root: row });
     await humanSleep();
   }
 }
 
+/** ③ 説明日・説明者（作成状態・登録ボタンは触らない） */
+async function handleFillFooter(basicInfo = {}) {
+  const F = SELECTORS.footer;
+  await setWarekiDate(F.explainDate, basicInfo.explainDate);
+  await fillInput(F.explainer, basicInfo.explainer);
+}
+
 // =============================================================
-// popup.js からのメッセージ受信 → 実行
+// ポップアップ（サービス設定）：フォーム入力
 // =============================================================
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (!message || message.type !== 'KAIPOKE_AUTOFILL') {
-    return; // 対象外メッセージは無視
+async function handleFillService(service = {}) {
+  const P = SELECTORS.popup;
+  await waitForElement(P.root); // フォーム出現待機
+  await humanSleep();
+
+  // 保険区分
+  await setRadio(service.insuranceType === '保険外' ? P.insuranceOutside : P.insuranceInside);
+  // 種類・事業所・内容・単位数
+  await selectOption(P.serviceType, service.serviceType);
+  await selectOption(P.serviceOffice, service.serviceOffice);
+  await fillInput(P.serviceContent, service.serviceContent);
+  await fillInput(P.units, service.units);
+
+  // 開始・終了時間（"08:00" → 時 "08" / 分 "00"）
+  const st = splitTime(service.startTime);
+  const et = splitTime(service.endTime);
+  if (st) { await selectOption(P.startHour, st.h); await selectOption(P.startMin, st.m); }
+  if (et) { await selectOption(P.endHour, et.h); await selectOption(P.endMin, et.m); }
+
+  // 提供サイクル（毎週/第N）＋曜日
+  if (service.provisionCycle === '第N' || service.provisionNthWeek) {
+    await setRadio(P.cycleNth);
+  } else {
+    await setRadio(P.cycleWeekly);
+  }
+  const days = Array.isArray(service.provisionDays) ? service.provisionDays : [];
+  for (const d of days) {
+    await setCheckbox(P.weekday(d), true);
   }
 
-  // 非同期処理の結果を返すため true を返す（sendResponse を後で呼ぶ）
+  // 保存（このあとウィンドウは閉じる想定。background が閉鎖を待つ）
+  const saveBtn = await waitForElement(P.saveButton);
+  await humanSleep();
+  safeClick(saveBtn);
+  await humanSleep();
+}
+
+/** "08:00" → {h:'08', m:'00'} */
+function splitTime(t) {
+  if (!t) return null;
+  const m = String(t).match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return { h: m[1], m: m[2] };
+}
+
+// =============================================================
+// 役割判定と初期化
+// =============================================================
+const IS_SERVICE_POPUP = location.href.includes(SELECTORS.url.servicePopup);
+
+// ポップアップページなら、読み込み完了を background に通知（順序制御のため）
+if (IS_SERVICE_POPUP) {
+  // background 側が待受を用意してからボタンが押される流れだが、取りこぼし防止に少し待って通知
+  const announce = () => chrome.runtime.sendMessage({ type: 'POPUP_READY' }, () => void chrome.runtime.lastError);
+  if (document.readyState === 'complete') announce();
+  else window.addEventListener('load', announce);
+}
+
+// =============================================================
+// background.js からのコマンド受信
+// =============================================================
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message || !message.cmd) return;
+
   (async () => {
     try {
-      await runAutofill(message.payload);
-      sendResponse({
-        ok: true,
-        message: `基本情報と ${message.payload.services.length} 件のサービスの下書き入力が完了しました。`,
-      });
+      switch (message.cmd) {
+        case 'FILL_BASIC': await handleFillBasic(message.basicInfo); break;
+        case 'OPEN_SERVICE_MODAL': await handleOpenServiceModal(message.insuranceType); break;
+        case 'FILL_SERVICE': await handleFillService(message.service); break;
+        case 'FILL_SUPPORT': await handleFillSupport(message.index, message.supportDetails); break;
+        case 'FILL_FOOTER': await handleFillFooter(message.basicInfo); break;
+        default: throw new Error('未知のコマンド: ' + message.cmd);
+      }
+      sendResponse({ ok: true });
     } catch (err) {
-      // 【暴走防止】どこかで停止した場合はユーザーに明示してから結果を返す
       const msg = err && err.message ? err.message : String(err);
-      // 画面上でも即座に気づけるようアラートを出す
+      // 【暴走防止】停止をユーザーに明示
       alert(
-        'カイポケ自動入力を安全に停止しました。\n\n' +
-        '理由：' + msg + '\n\n' +
-        '画面のレイアウトが変わった可能性があります。\n' +
-        'システム管理者にセレクタ（SELECTORS）の確認を依頼してください。'
+        'カイポケ自動入力を安全に停止しました。\n\n理由：' + msg +
+        '\n\n画面のレイアウトが変わった可能性があります。\nシステム部にセレクタ（SELECTORS）の確認を依頼してください。'
       );
       sendResponse({ ok: false, message: msg });
     }
   })();
 
-  return true; // 非同期応答を有効化
+  return true; // 非同期応答
 });

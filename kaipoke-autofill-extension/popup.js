@@ -1,88 +1,82 @@
 // popup.js
-// 役割：テキストエリアの JSON をパース・検証し、content.js へ送信する。
-// このファイルは DOM 操作もカイポケ通信も行わない（送信の中継のみ）。
+// 役割：テキストエリアの JSON をパース・検証し、background.js（調整役）へ開始を依頼する。
+// このファイルは DOM 操作もカイポケ通信も行わない。
 
 // -------------------------------------------------------------
-// サンプルJSON（貼り付け欄の初期例・フォーマット確認用）
-// 実データは「サービス提供責任者・管理者」がAIで作成する（README参照）。
+// サンプルJSON（実画面「訪問介護計画書 新規追加」に対応した構造）
+// 実データは「サービス提供責任者（サ責）」がAIで作成する（README参照）。
+// ※ select 項目（適用期間・事業所・ケアマネ・サービス種類・サービス項目）は
+//   カイポケに登録済みの選択肢と「完全一致」する文字列にすること。
 // -------------------------------------------------------------
 const SAMPLE_JSON = {
   basicInfo: {
-    // 基本情報エリアに入力する項目（キーは content.js の SELECTORS と対応）
-    createdDate: "2026-07-13",      // 作成年月日
-    author: "山本 太郎",            // 計画作成者
-    planPeriodFrom: "2026-08-01",   // 計画期間（開始）
-    planPeriodTo: "2027-01-31",     // 計画期間（終了）
-    goal: "自宅で安全に生活を継続できる。"  // 援助目標
+    createdDate: "令和8年7月13日",
+    insurancePeriod: "令和8年2月2日から令和9年2月28日まで",
+    author: "山本 禎典",
+    careOffice: "向日葵 介護センター",
+    careManager: "矢部 房子",
+    issues: "自宅で安全に生活を継続すること。",
+    longTermGoal: "住み慣れた自宅で自立した生活を送れる。",
+    shortTermGoal: "入浴・清潔保持を安全に行える。",
+    personFamilyHope: "できる限り自宅で過ごしたい。",
+    notes: "母国語が話せるヘルパーを派遣いたします。",
+    explainDate: "令和8年4月8日",
+    explainer: "麻生 操子"
   },
   services: [
-    // ポップアップ（モーダル）で1件ずつ追加していくサービスの配列
     {
-      serviceType: "身体介護",       // サービス種別
-      dayOfWeek: "月",               // 曜日
-      startTime: "10:00",           // 開始時刻
-      endTime: "11:00",             // 終了時刻
-      // メイン画面に生成されるタブへ入力する援助内容
-      supportContent: "入浴介助、着替えの見守り。"
-    },
-    {
-      serviceType: "生活援助",
-      dayOfWeek: "木",
-      startTime: "14:00",
-      endTime: "15:00",
-      supportContent: "掃除、買い物代行。"
+      insuranceType: "保険内",
+      serviceType: "身体生活",
+      serviceOffice: "訪問介護 いっぽ(2371005485)",
+      serviceContent: "入浴介助・生活援助",
+      units: "75",
+      startTime: "08:00",
+      endTime: "09:15",
+      additions: [],
+      provisionCycle: "毎週",
+      provisionNthWeek: null,
+      provisionDays: ["月", "水", "金"],
+      supportDetails: [
+        { category: "身体", item: "全身浴",   content: "入浴介助または清拭", requiredTime: "20", notes: "" },
+        { category: "身体", item: "更衣介助", content: "洗面等、着替え、歯磨き", requiredTime: "10", notes: "" },
+        { category: "生活", item: "掃除",     content: "居室、トイレ、浴室、台所などの掃除", requiredTime: "80", notes: "" }
+      ]
     }
   ]
 };
 
-// ステータス表示ヘルパー
 const statusEl = document.getElementById("status");
 function setStatus(message, kind = "info") {
   statusEl.textContent = message;
-  statusEl.className = "status-" + kind; // status-info / status-ok / status-error
+  statusEl.className = "status-" + kind;
 }
 
 // -------------------------------------------------------------
 // 入力JSONの簡易バリデーション
-// basicInfo（オブジェクト）と services（配列）を持つ階層構造を必須とする。
 // -------------------------------------------------------------
 function validatePayload(data) {
-  if (typeof data !== "object" || data === null) {
-    throw new Error("JSONのトップレベルはオブジェクトである必要があります。");
-  }
-  if (typeof data.basicInfo !== "object" || data.basicInfo === null) {
-    throw new Error('"basicInfo"（基本情報オブジェクト）がありません。');
-  }
-  if (!Array.isArray(data.services)) {
-    throw new Error('"services"（サービスの配列）がありません。');
-  }
-  if (data.services.length === 0) {
-    throw new Error('"services" が空です。少なくとも1件のサービスを含めてください。');
-  }
+  if (typeof data !== "object" || data === null) throw new Error("JSONのトップレベルはオブジェクトである必要があります。");
+  if (typeof data.basicInfo !== "object" || data.basicInfo === null) throw new Error('"basicInfo"（基本情報オブジェクト）がありません。');
+  if (!Array.isArray(data.services)) throw new Error('"services"（サービスの配列）がありません。');
+  if (data.services.length === 0) throw new Error('"services" が空です。少なくとも1件のサービスを含めてください。');
+  data.services.forEach((s, i) => {
+    if (s.supportDetails && !Array.isArray(s.supportDetails)) {
+      throw new Error(`services[${i}].supportDetails は配列である必要があります。`);
+    }
+  });
 }
 
-// -------------------------------------------------------------
-// 「サンプルを挿入」ボタン
-// -------------------------------------------------------------
+// 「サンプルを挿入」
 document.getElementById("sampleBtn").addEventListener("click", () => {
   document.getElementById("jsonInput").value = JSON.stringify(SAMPLE_JSON, null, 2);
   setStatus("サンプルを挿入しました。内容を編集して実行してください。", "info");
 });
 
-// -------------------------------------------------------------
-// 「自動入力を実行」ボタン
-// 1) JSONをパース＆検証
-// 2) アクティブなカイポケタブを取得
-// 3) content.js にメッセージ送信
-// -------------------------------------------------------------
+// 「自動入力を実行」
 document.getElementById("runBtn").addEventListener("click", async () => {
   const raw = document.getElementById("jsonInput").value.trim();
+  if (!raw) { setStatus("JSONを貼り付けてください。", "error"); return; }
 
-  // 1) 入力チェック＆パース
-  if (!raw) {
-    setStatus("JSONを貼り付けてください。", "error");
-    return;
-  }
   let payload;
   try {
     payload = JSON.parse(raw);
@@ -92,7 +86,7 @@ document.getElementById("runBtn").addEventListener("click", async () => {
     return;
   }
 
-  // 2) アクティブタブの取得（activeTab 権限）
+  // アクティブタブ（＝メイン画面）の取得
   let tab;
   try {
     [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -100,37 +94,29 @@ document.getElementById("runBtn").addEventListener("click", async () => {
     setStatus("アクティブタブの取得に失敗しました：" + e.message, "error");
     return;
   }
-  if (!tab || !tab.id) {
-    setStatus("対象のタブが見つかりません。", "error");
-    return;
-  }
-
-  // 対象がカイポケのページか簡易確認（誤操作防止）
+  if (!tab || !tab.id) { setStatus("対象のタブが見つかりません。", "error"); return; }
   if (!tab.url || !/^https:\/\/[^/]*kaipoke\.biz\//.test(tab.url)) {
     setStatus("カイポケ（kaipoke.biz）の計画書画面を開いた状態で実行してください。", "error");
     return;
   }
 
-  // 3) content.js へメッセージ送信
-  setStatus("自動入力を開始しました。カイポケ画面の進捗をご確認ください…", "info");
+  // ★ポップアップブロックの注意（サービス設定は別ウィンドウで開く）
+  setStatus("自動入力を開始しました。\n※サービス設定は別ウィンドウで開きます。ポップアップがブロックされないよう許可してください。\nカイポケ画面の進捗をご確認ください…", "info");
+
+  // background.js（調整役）へ開始依頼。メインタブID を渡す。
   try {
-    const response = await chrome.tabs.sendMessage(tab.id, {
-      type: "KAIPOKE_AUTOFILL",
+    const response = await chrome.runtime.sendMessage({
+      type: "START_AUTOFILL",
+      tabId: tab.id,
       payload,
     });
-
-    // content.js からの結果を表示
     if (response && response.ok) {
       setStatus("完了しました：" + (response.message || "自動入力が終了しました。") +
-        "\n※必ず目視確認のうえ、ご自身で登録してください。", "ok");
+        "\n※必ず目視確認のうえ、作成状態を「作成済」にしてから、ご自身で「登録する」を押してください。", "ok");
     } else {
       setStatus("停止しました：" + ((response && response.message) || "不明なエラー"), "error");
     }
   } catch (e) {
-    // content.js が注入されていない等
-    setStatus(
-      "content.js と通信できませんでした。カイポケの計画書画面で拡張機能を再読み込みしてください。\n詳細：" + e.message,
-      "error"
-    );
+    setStatus("拡張機能と通信できませんでした。カイポケの計画書画面で拡張機能を再読み込みしてください。\n詳細：" + e.message, "error");
   }
 });

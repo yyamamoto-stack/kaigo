@@ -196,3 +196,26 @@ await humanSleep();
 
 **禁止:** スリープを省いた連続操作、タイムアウトなしの待機、
 `element.value = x` だけの入力（`claude.md` 参照）。
+
+---
+
+## 6. 追加スキル（v2：実画面対応で追加）
+
+実際のカイポケ計画書画面はラジオ・チェックボックス・和暦プルダウンを多用するため、
+以下の派生スキルを `content.js` に実装している（実装本体は `content.js` を正とする）。
+
+- `setRadio(selector)` … ラジオを選択し change を発火（安全クリックも併用）。
+- `setCheckbox(selector, checked)` … 現在状態と異なる時だけクリックして希望状態にする。
+- `selectOption(selector, value)` … value か表示テキストで select を選択（不一致は安全停止）。
+  部分一致もフォールバックで試すが、原則は**カイポケ登録値と完全一致**する文字列を渡す。
+- `setWarekiDate(dateSelectors, "令和8年7月13日")` … 元号/年/月/日の select 群へ和暦を設定。
+- `parseWareki(str)` … 和暦文字列を `{era, year, month, day}` に分解。
+
+いずれも各操作間に `humanSleep()` を挟むこと（連続リクエスト回避）。
+
+## 7. 親子ウィンドウの調整（background.js）
+
+サービス設定は**別ウィンドウ（ポップアップ）**で開くため、DOM操作は行わず順序制御だけを担う
+`background.js`（Service Worker）を置く。メイン画面と各ポップアップの `content.js` を
+メッセージで仲介し、「基本情報→（サービスごとに）ポップアップ入力→援助内容タブ入力→説明欄」の
+順に進める。`background.js` でも fetch 等の外部通信は行わない（中継と待機のみ）。

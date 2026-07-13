@@ -26,12 +26,16 @@
 
 | ファイル | 説明 |
 | --- | --- |
-| `manifest.json` | 拡張機能定義（Manifest V3、権限はカイポケ URL のみ） |
-| `popup.html` / `popup.js` | JSON 貼り付け UI と、content.js への送信処理 |
-| `content.js` | DOM 操作のコアロジック（先頭に `SELECTORS` を集約） |
+| `manifest.json` | 拡張機能定義（Manifest V3、権限はカイポケ URL のみ、background 登録） |
+| `popup.html` / `popup.js` | JSON 貼り付け UI と、background への開始依頼 |
+| `background.js` | 親（メイン画面）と子（サービス設定ポップアップ）の content.js を仲介する調整役（Service Worker） |
+| `content.js` | DOM 操作のコアロジック（先頭に `SELECTORS` を集約、URL で役割判定） |
 | `claude.md` | プロジェクトの絶対ルール（コンプライアンス／技術規約） |
-| `skills.md` | コアスキル（`waitForElement` / `setNativeValue` / `safeClick` / `sleep`）の実装定義 |
+| `skills.md` | コアスキル（`waitForElement` / `setNativeValue` / `safeClick` / `sleep` ほか）の実装定義 |
 | `README.md` | 本ファイル（運用マニュアル・部署別の役割） |
+
+> ℹ️ **v2 の重要な変更**：カイポケの「サービス設定」は**別ウィンドウ（ポップアップ）**で開くため、
+> それを跨いで順序制御する `background.js` を追加し、JSON 構造を実画面に合わせて拡張しました。
 
 ---
 
@@ -48,33 +52,47 @@
 ## 🖱️ 使い方（事務・入力担当スタッフ向け）
 
 1. カイポケにログインし、「**訪問介護計画書 新規追加**」画面を開く。
-2. ブラウザ右上の拡張機能アイコンをクリックしてポップアップを開く。
-3. サービス提供責任者から受け取った **JSON データ**をテキストエリアに貼り付ける。
+2. **⚠️ ポップアップブロックを許可**する（サービス設定は別ウィンドウで開くため）。
+3. ブラウザ右上の拡張機能アイコンをクリックしてポップアップを開く。
+4. サービス提供責任者から受け取った **JSON データ**をテキストエリアに貼り付ける。
    （フォーマット確認用に「サンプルを挿入」ボタンあり）
-4. 「**自動入力を実行**」を押す。カイポケ画面が自動で入力されていく。
-5. **⚠️ 入力完了後、必ず目視で内容を確認**し、誤りが無ければ
-   **自分でカイポケの「登録（保存）」ボタンを押す**。
+5. 「**自動入力を実行**」を押す。基本情報 → 各サービス（別ウィンドウ）→ 援助内容タブ、の順で自動入力される。
+6. **⚠️ 入力完了後、必ず目視で内容を確認**し、誤りが無ければ
+   **作成状態を「作成済」にして、自分でカイポケの「登録する」ボタンを押す**。
 
-### JSON データの形式
+### JSON データの形式（v2：実画面対応）
 
-`basicInfo`（基本情報）と `services`（サービスの配列）を持つ階層構造です。
+`basicInfo`（基本情報＋援助目標＋説明欄）と `services`（サービスの配列）を持つ階層構造です。
+日付は**和暦**、`services[].supportDetails` は**援助内容の行の配列**です。
+select 項目（適用期間・事業所・ケアマネ・サービス種類・サービス項目）は
+**カイポケ登録値と完全一致**する文字列にしてください。詳細は Drive のフィールド定義書を参照。
 
 ```json
 {
   "basicInfo": {
-    "createdDate": "2026-07-13",
-    "author": "山本 太郎",
-    "planPeriodFrom": "2026-08-01",
-    "planPeriodTo": "2027-01-31",
-    "goal": "自宅で安全に生活を継続できる。"
+    "createdDate": "令和8年7月13日",
+    "insurancePeriod": "令和8年2月2日から令和9年2月28日まで",
+    "author": "山本 禎典",
+    "careOffice": "向日葵 介護センター",
+    "careManager": "矢部 房子",
+    "issues": "…", "longTermGoal": "…", "shortTermGoal": "…",
+    "personFamilyHope": "…", "notes": "…",
+    "explainDate": "令和8年4月8日", "explainer": "麻生 操子"
   },
   "services": [
     {
-      "serviceType": "身体介護",
-      "dayOfWeek": "月",
-      "startTime": "10:00",
-      "endTime": "11:00",
-      "supportContent": "入浴介助、着替えの見守り。"
+      "insuranceType": "保険内",
+      "serviceType": "身体生活",
+      "serviceOffice": "訪問介護 いっぽ(2371005485)",
+      "serviceContent": "入浴介助・生活援助",
+      "units": "75",
+      "startTime": "08:00", "endTime": "09:15",
+      "additions": [],
+      "provisionCycle": "毎週", "provisionNthWeek": null,
+      "provisionDays": ["月", "水", "金"],
+      "supportDetails": [
+        { "category": "身体", "item": "全身浴", "content": "入浴介助または清拭", "requiredTime": "20", "notes": "" }
+      ]
     }
   ]
 }
