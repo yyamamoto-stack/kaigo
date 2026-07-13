@@ -123,6 +123,30 @@ async function orchestrate(payload, mainTabId) {
 }
 
 // -------------------------------------------------------------
+// 開始：計画書の種別（モード）で分岐
+//   - inline（障害）: content.js に RUN_ALL を送り、全処理をページ内で完結させる
+//   - window（要介護/要支援）: 別ウィンドウのポップアップをまたいで orchestrate する
+// -------------------------------------------------------------
+async function startAutofill(payload, mainTabId) {
+  // メインタブに種別（モード）を問い合わせる
+  const modeInfo = await new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(mainTabId, { cmd: 'GET_MODE' }, (res) => {
+      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+      resolve(res);
+    });
+  });
+  if (!modeInfo || !modeInfo.ok) throw new Error((modeInfo && modeInfo.message) || '計画書の種別を判定できませんでした。');
+
+  if (modeInfo.mode === 'inline') {
+    // 障害: ページ内で完結
+    return await sendToTab(mainTabId, { cmd: 'RUN_ALL', payload });
+  }
+  // 要介護/要支援: 別ウィンドウ調整
+  const result = await orchestrate(payload, mainTabId);
+  return { ok: true, message: `サービス ${result.count} 件の下書き入力が完了しました。` };
+}
+
+// -------------------------------------------------------------
 // メッセージ受信ハンドラ
 //   - START_AUTOFILL : popup.js からの開始指示（メインタブIDとpayloadを含む）
 //   - POPUP_READY    : ポップアップ側 content.js の準備完了通知
@@ -146,8 +170,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // popup.js からの自動入力開始
   if (message.type === 'START_AUTOFILL') {
     const mainTabId = message.tabId;
-    orchestrate(message.payload, mainTabId)
-      .then((result) => sendResponse({ ok: true, message: `サービス ${result.count} 件の下書き入力が完了しました。` }))
+    startAutofill(message.payload, mainTabId)
+      .then((result) => sendResponse(result))
       .catch((err) => sendResponse({ ok: false, message: err && err.message ? err.message : String(err) }));
     return true; // 非同期応答
   }
