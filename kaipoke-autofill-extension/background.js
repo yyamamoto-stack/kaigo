@@ -105,10 +105,12 @@ async function orchestrate(payload, mainTabId) {
     const popupTabId = await popupReady;
     await sendToTab(popupTabId, { cmd: 'FILL_SERVICE', service });
 
-    // ポップアップが閉じるのを待つ（保存後に自動で閉じる想定）
+    // ポップアップが閉じるのを待つ（保存後に自動で閉じ、親画面は opener.refresh() で再読込される）
     await waitForTabRemoved(popupTabId);
+    // 親画面の再読込＋content.js再注入が落ち着くのを待つ
+    await new Promise((r) => setTimeout(r, 2500));
 
-    // c. メイン画面：動的生成されたサービスタブに援助内容を入力
+    // c. メイン画面：サービスindexの援助内容（listDetail:index）に入力
     await sendToTab(mainTabId, {
       cmd: 'FILL_SUPPORT',
       index: i,

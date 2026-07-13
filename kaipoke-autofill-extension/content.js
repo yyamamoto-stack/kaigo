@@ -1,123 +1,146 @@
-// content.js（v3：計画書3種対応 / 障害は実DOM反映済み）
-// カイポケ計画書の自動入力コアロジック。計画書は3種類あり、URLで判定して振る舞う。
+// content.js（v4：計画書3種すべて実DOM反映）
+// カイポケ計画書の自動入力コアロジック。計画書は3種類。URLで判定して振る舞う。
 //
-//   ・要介護  訪問介護計画書       : メイン MEM093151 / サービス設定ポップアップ 別ウィンドウ MEM093104
-//   ・要支援  訪問介護計画書       : メイン MEM093155 / サービス設定ポップアップ 別ウィンドウ MEM093104
-//   ・障害    居宅介護等計画書     : メイン MEM083101（新規）/ MEM083103（編集）
-//              → サービス設定は【同一ページ内のインラインポップアップ】(disableFormPopup:*)。別ウィンドウではない。
+//   ・要介護  訪問介護計画書        : メイン MEM093151(新規)/MEM093103(編集)  + サービス設定は別ウィンドウ MEM093104
+//   ・要支援  介護予防訪問介護計画書 : メイン MEM093155                        + サービス設定は別ウィンドウ MEM093104
+//   ・障害    居宅介護等計画書       : メイン MEM083101(新規)/MEM083103(編集)  + サービス設定はインライン disableFormPopup
 //
-// 【コンプライアンス】（claude.md）
-//   - 内部API直叩き（fetch/XHR）は行わない。純粋なDOM操作のみ。
-//   - すべてのアクション間に humanSleep()（500〜1500ms）。JSFはajax再描画が入るため待機は特に重要。
-//   - waitForElement は必ずタイムアウト（既定10秒）。失敗時は安全停止＋alert。
-//   - セレクタは PROFILES に集約（ハードコード禁止）。
-//
-// 【実装状況】
-//   - 障害（MEM083101/083103）: 添付HTMLの実DOMから selector を反映（要ライブ検証）。
-//   - 要介護/要支援（MEM093151/093155 + 093104ポップアップ）: 実HTML未入手のため selector はプレースホルダ。
-//   - カイポケUI変更時は PROFILES のみ修正すれば復旧できる構造を維持する。
+// 【コンプライアンス】（claude.md）内部API直叩き禁止・全アクション間 humanSleep・waitForElement は10秒タイムアウト＋安全停止。
+// 【JSF/RichFaces】idはコロン付き（form:xxx）→ 属性セレクタ [id="..."] で指定。選択のたびにajax再描画が入るため待機が重要。
+// 【実装状況】3種とも実HTML（MEM093103/093155/093104/083103）から実DOMを反映。ライブ動作の微調整は要検証。
+
+// 属性セレクタ生成（JSFのコロンidを安全に指定）
+const ID = (id) => `[id="${id}"]`;
+// 曜日 → checkedDays の value（実DOMのラベルより確定: 01=日 … 07=土）
+const WD = { '日': '01', '月': '02', '火': '03', '水': '04', '木': '05', '金': '06', '土': '07' };
 
 // =============================================================
-// PROFILES — 計画書種別ごとのセレクタ集約
-//   JSFのidはコロン(:)を含むため、CSSでは属性セレクタ [id="..."] を使う（コロンのエスケープ不要）。
-//   画像ボタンは alt 属性で指定する。
+// PROFILES — 計画書種別ごとのセレクタ集約（ハードコード禁止）
 // =============================================================
 const PROFILES = {
-  // ---------------------------------------------------------
-  // 障害福祉サービス「居宅介護等計画書」 ★実DOM反映済み
-  //   ・区分（要介護度）や相談支援事業所の紐づけは無い → 該当項目はスルー（JSON側も持たない）
-  //   ・サービス設定はインラインポップアップ（同一document）
-  //   ・援助内容は「サービスごとのタブ」ではなく form:service:0..N の単一テーブル（フラット）
-  // ---------------------------------------------------------
-  shogai: {
-    label: '障害（居宅介護等計画書）',
-    match: ['MEM083101', 'MEM083103'],
-    mode: 'inline',                 // サービス設定は同一ページ内
-    sel: {
-      // 基本情報
-      createdDate: { era: '[id="form:makeYmdEra"]', year: '[id="form:makeYmdYear"]', month: '[id="form:makeYmdMonth"]', day: '[id="form:makeYmdDay"]' },
-      author: '[id="form:planMakePersonId"]',        // 計画作成者氏名（text）
-      // 援助目標（障害は 本人・家族の希望 と 援助目標 の2つ）
-      hopePerson: '[id="form:hopePerson"]',           // 本人・家族の希望（textarea）
-      assistanceGoal: '[id="form:assistanceGoal"]',   // 援助目標（textarea）
-      // 契約支給量テーブル（form:loop:N）。serviceSubjectDivision(種別) と contractSupplyQuantity(支給量)
-      supplyRowQty: (n) => `[id="form:loop:${n}:contractSupplyQuantity"]`,
-      supplyRowKind: (n) => `[id="form:loop:${n}:serviceSubjectDivision"]`,
-      // 援助内容（フラットテーブル form:service:N）
-      supportTime: (n) => `[id="form:service:${n}:timeRequire"]`,
-      supportDivision: (n) => `[id="form:service:${n}:serviceAlternateDivision"]`,          // サービス区分
-      supportItem: (n) => `[id="form:service:${n}:serviceAlternateAssistDivision"]`,        // サービス項目
-      supportHeed: (n) => `[id="form:service:${n}:heedPointMatterSubject"]`,                // 留意点
-      supportHope: (n) => `[id="form:service:${n}:personAndFamilyAssistance"]`,             // 本人・家族の援助
-      addSupportRow: 'input[alt="行を追加する"], img[alt="行を追加する"]',
-      // 説明日（deliveryDay）
-      deliveryDate: { era: '[id="form:deliveryDayEra"]', year: '[id="form:deliveryDayYear"]', month: '[id="form:deliveryDayMonth"]', day: '[id="form:deliveryDayDay"]' },
-      // 作成状態（01=作成中 / 02=作成済）。自動化では触らない（作成中のまま）。
-      // 最終「登録する」(alt=登録する, form:j_id...) は人間が押す。自動化では押さない。
-      // --- インライン サービス設定ポップアップ ---
-      addServiceButton: 'input[alt="新規追加する"], img[alt="新規追加する"]',
-      popup: {
-        root: '[id="disableFormPopup:serviceKindId"]',   // ポップアップ出現の目印
-        insuranceInside: '[id="disableFormPopup:insuranceDivision:0"]',  // value=04
-        insuranceOutside: '[id="disableFormPopup:insuranceDivision:1"]', // value=02
-        serviceKind: '[id="disableFormPopup:serviceKindId"]',           // サービス種類（select）
-        servicePlant: '[id="disableFormPopup:servicePlant"]',           // サービス事業所（select）
-        startTime: '[id="disableFormPopup:startTime"]',                 // 開始時間（text 例 08:00）
-        endTime: '[id="disableFormPopup:endTime"]',                     // 終了時間（text）
-        // 曜日チェック（value 01..07）。index 0..6。※月〜日の割当は要確認（下 WEEKDAY_VALUE）。
-        weekday: (v) => `[id="disableFormPopup:checkedDays:${v}"]`,
-        regist: 'input[alt="登録する"][id^="disableFormPopup"], [id="disableFormPopup:regist"]', // ポップアップの登録（サービス追加）
-      },
-    },
-  },
-
-  // ---------------------------------------------------------
-  // 要介護 訪問介護計画書 … ★実HTML未入手（プレースホルダ）。サービス設定は別ウィンドウ。
-  // ---------------------------------------------------------
+  // ---------- 要介護 訪問介護計画書 ----------
   youkaigo: {
-    label: '要介護（訪問介護計画書）',
-    match: ['MEM093151'],
+    label: '要介護 訪問介護計画書',
+    match: ['MEM093151', 'MEM093103'],
     mode: 'window',
     servicePopupMatch: 'MEM093104',
-    sel: {
-      createdDate: { era: '#createdDate-era', year: '#createdDate-year', month: '#createdDate-month', day: '#createdDate-day' },
-      insurancePeriod: '#insurance-period', author: '#plan-author', careOffice: '#care-office', careManager: '#care-manager',
-      issues: '#goal-issues', longTerm: '#goal-long-term', shortTerm: '#goal-short-term', hopePerson: '#goal-hope', notes: '#goal-notes',
-      addServiceButton: '#btn-add-service', tabInsurance: '#tab-hokennai', tabOutside: '#tab-hokengai',
-      supportTab: '#service-tab-{index}', supportTabContent: '#service-tab-content-{index}',
-      supportRows: '.support-row', addSupportRow: '.support-add-row',
-      rowCategory: '.support-category', rowItem: '.support-item', rowContent: '.support-content', rowTime: '.support-time', rowNotes: '.support-notes',
-      deliveryDate: { era: '#explainDate-era', year: '#explainDate-year', month: '#explainDate-month', day: '#explainDate-day' }, explainer: '#explainer',
-      popup: {
-        root: '#service-form',
-        insuranceInside: 'input[name="hokenKubun"][value="1"]', insuranceOutside: 'input[name="hokenKubun"][value="2"]',
-        serviceType: '#service-type', serviceOffice: '#service-office', serviceContent: '#service-content', units: '#service-units',
-        startHour: '#start-hour', startMin: '#start-min', endHour: '#end-hour', endMin: '#end-min',
-        cycleWeekly: 'input[name="teikyoCycle"][value="weekly"]', cycleNth: 'input[name="teikyoCycle"][value="nth"]',
-        weekday: (d) => `input[name="youbi"][value="${d}"]`, saveButton: '#btn-service-save',
-      },
-    },
+    isYoshien: false,
+    sel: mainSelKaigo(false),
+    popupSel: popupSel093104(),
   },
-
-  // ---------------------------------------------------------
-  // 要支援 訪問介護計画書 … ★実HTML未入手（プレースホルダ）。要介護と同型・メインURLのみ異なる。
-  // ---------------------------------------------------------
+  // ---------- 要支援 介護予防訪問介護計画書 ----------
   youshien: {
-    label: '要支援（訪問介護計画書）',
+    label: '要支援 介護予防訪問介護計画書',
     match: ['MEM093155'],
     mode: 'window',
     servicePopupMatch: 'MEM093104',
-    sel: null, // 実装時に youkaigo.sel を基に調整（実HTML入手後）
+    isYoshien: true,
+    sel: mainSelKaigo(true),
+    popupSel: popupSel093104(),
+  },
+  // ---------- 障害 居宅介護等計画書 ----------
+  shogai: {
+    label: '障害 居宅介護等計画書',
+    match: ['MEM083101', 'MEM083103'],
+    mode: 'inline',
+    sel: mainSelShogai(),
+    popupSel: popupSelShogai(),
   },
 };
-// 要支援は当面 要介護と同じセレクタ想定（実HTML入手後に分離）
-PROFILES.youshien.sel = PROFILES.youkaigo.sel;
 
-// 曜日 → チェックボックス value（01..07）の割当。※カイポケ実画面で要確認。
-// 暫定: 月=01, 火=02, 水=03, 木=04, 金=05, 土=06, 日=07
-const WEEKDAY_VALUE = { '月': '01', '火': '02', '水': '03', '木': '04', '金': '05', '土': '06', '日': '07' };
+// 要介護/要支援 メイン画面の実DOMセレクタ
+function mainSelKaigo(isYoshien) {
+  return {
+    createdDate: { era: ID('form:makeYmdEra'), year: ID('form:makeYmdYear'), month: ID('form:makeYmdMonth'), day: ID('form:makeYmdDay') },
+    insuredProof: ID('form:ledInsuredPersonProofInternalId'),      // 被保険者証（適用期間）
+    author: ID('form:planMakePersonId'),                           // 計画作成者氏名
+    communityGeneralSc: isYoshien ? ID('form:communityGeneralScId') : null, // 介護予防支援事業所（要支援のみ）
+    careOffice: ID('form:homeCareSoId'),                           // 居宅介護支援事業所
+    careManager: ID('form:companyChargeCareManagerId'),            // 担当ケアマネージャー
+    issues: ID('form:pivotSolutionThemeSubject'),                  // 解決すべき課題
+    longTerm: ID('form:longTimePeriodMarkSubject'),                // 長期目標
+    shortTerm: ID('form:shortTermMarkSubject'),                    // 短期目標
+    hopePerson: ID('form:personHimselfHopeSubject'),               // 本人・家族の希望
+    notes: ID('form:heedPointMatterSubject'),                      // 留意点
+    serviceActButton: ID('form:serviceAct'),                       // 「新規追加する」→サービス設定ポップアップ（別ウィンドウ）
+    // 援助内容: form:listDetail:{S}:{field}{R}（S=サービス0始まり, R=行1..7）
+    support: {
+      division: (s, r) => ID(`form:listDetail:${s}:visitServiceAlternateDivision${r}`),
+      item: (s, r) => ID(`form:listDetail:${s}:visitServiceAlternateAssistDivision${r}`),
+      content: (s, r) => ID(`form:listDetail:${s}:serviceConcreteSubject${r}`),
+      time: (s, r) => ID(`form:listDetail:${s}:timeRequired${r}`),
+      notes: (s, r) => ID(`form:listDetail:${s}:heedPointMatterSubject${r}`),
+      maxRows: 7,
+    },
+    deliveryDate: { era: ID('form:startDate1Era'), year: ID('form:startDate1Year'), month: ID('form:startDate1Month'), day: ID('form:startDate1Day') }, // 説明日
+    explainer: ID('form:descriptionPersonId'),                     // 説明者
+    // 作成状態(form:a24) と 登録(form:update) は自動化では触らない（人間が押す）
+  };
+}
 
-// URL から適用プロファイルを判定
+// 介護のサービス設定ポップアップ（MEM093104, 別ウィンドウ）の実DOMセレクタ
+function popupSel093104() {
+  return {
+    root: ID('form:serviceKind'),
+    insuranceInside: ID('form:insuranceDivision:0'),   // 01 保険内
+    insuranceOutside: ID('form:insuranceDivision:1'),  // 02 保険外
+    serviceKind: ID('form:serviceKind'),               // サービス種類
+    servicePlant: ID('form:servicePlant'),             // サービス事業所
+    serviceContentBox: ID('form:service_content'),     // サービス内容（種類選択後にajaxで読み込まれるラジオ群）
+    unit: ID('form:unit'),                             // 単位数
+    startHour: ID('form:startHour'), startMin1: ID('form:startMinute1'), startMin2: ID('form:startMinute2'),
+    endHour: ID('form:endHour'), endMin1: ID('form:endMinute1'), endMin2: ID('form:endMinute2'),
+    weeklyRadio: ID('form:supportDay01:0'),            // 毎週/奇数/偶数 側
+    weekType: ID('form:weekType'),                     // 01毎週 02奇数週 03偶数週
+    checkedDay: (day) => `input[name="form:checkedDays"][value="${WD[day]}"]`,
+    nthRadio: ID('form:supportDay02:0'),               // 第N曜日 側
+    weekCount: ID('form:weekCount'),                   // 04第1..08最終
+    nthDay: ID('form:day'),                            // 01日曜..07土曜
+    regist: ID('form:regist'),                         // 保存する
+    time: 'split3',                                    // 時刻の入力形式（時/分十/分一）
+  };
+}
+
+// 障害 居宅介護等計画書 メイン画面の実DOMセレクタ
+function mainSelShogai() {
+  return {
+    createdDate: { era: ID('form:makeYmdEra'), year: ID('form:makeYmdYear'), month: ID('form:makeYmdMonth'), day: ID('form:makeYmdDay') },
+    author: ID('form:planMakePersonId'),
+    hopePerson: ID('form:hopePerson'),                 // 本人・家族の希望
+    assistanceGoal: ID('form:assistanceGoal'),         // 援助目標
+    // 契約支給量（障害のみ）: form:loop:N
+    supplyQty: (n) => ID(`form:loop:${n}:contractSupplyQuantity`),
+    // 援助内容フラット: form:service:N
+    support: {
+      division: (n) => ID(`form:service:${n}:serviceAlternateDivision`),
+      item: (n) => ID(`form:service:${n}:serviceAlternateAssistDivision`),
+      time: (n) => ID(`form:service:${n}:timeRequire`),
+      notes: (n) => ID(`form:service:${n}:heedPointMatterSubject`),
+      hope: (n) => ID(`form:service:${n}:personAndFamilyAssistance`),
+    },
+    addSupportRow: 'input[alt="行を追加する"], img[alt="行を追加する"]',
+    deliveryDate: { era: ID('form:deliveryDayEra'), year: ID('form:deliveryDayYear'), month: ID('form:deliveryDayMonth'), day: ID('form:deliveryDayDay') },
+    addServiceButton: 'input[alt="新規追加する"], img[alt="新規追加する"]',
+  };
+}
+
+// 障害のサービス設定（インライン disableFormPopup）
+function popupSelShogai() {
+  return {
+    root: ID('disableFormPopup:serviceKindId'),
+    insuranceInside: ID('disableFormPopup:insuranceDivision:0'),   // 04（障害）
+    insuranceOutside: ID('disableFormPopup:insuranceDivision:1'),  // 02
+    serviceKind: ID('disableFormPopup:serviceKindId'),
+    servicePlant: ID('disableFormPopup:servicePlant'),
+    startTime: ID('disableFormPopup:startTime'),                   // text（例 08:00）
+    endTime: ID('disableFormPopup:endTime'),
+    checkedDay: (day) => `input[name="disableFormPopup:checkedDays"][value="${WD[day]}"]`,
+    regist: ID('disableFormPopup:regist'),
+    time: 'text',
+  };
+}
+
+// URL からプロファイル判定
 function detectProfile() {
   const href = location.href;
   for (const key of Object.keys(PROFILES)) {
@@ -128,13 +151,8 @@ function detectProfile() {
   return null;
 }
 
-// {index} プレースホルダ埋め込み
-function buildSelector(template, params = {}) {
-  return template.replace(/\{(\w+)\}/g, (_, k) => String(params[k]));
-}
-
 // =============================================================
-// コアスキル（skills.md 準拠）
+// コアスキル
 // =============================================================
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function humanSleep() { return sleep(500 + Math.floor(Math.random() * 1001)); }
@@ -153,10 +171,7 @@ function waitForElement(selector, options = {}) {
     const tick = () => {
       const el = root.querySelector(selector);
       if (el && isVisible(el)) { resolve(el); return; }
-      if (Date.now() - startedAt >= timeout) {
-        reject(new Error(`要素が見つかりませんでした（タイムアウト ${timeout}ms）: "${selector}"`));
-        return;
-      }
+      if (Date.now() - startedAt >= timeout) { reject(new Error(`要素が見つかりませんでした（タイムアウト ${timeout}ms）: "${selector}"`)); return; }
       setTimeout(tick, interval);
     };
     tick();
@@ -185,13 +200,10 @@ function safeClick(element) {
   element.click();
 }
 
-// 入力ヘルパー
 async function fillInput(selector, value, options = {}) {
   if (value === undefined || value === null || value === '') return;
   const el = await waitForElement(selector, options);
-  await humanSleep();
-  setNativeValue(el, String(value));
-  await humanSleep();
+  await humanSleep(); setNativeValue(el, String(value)); await humanSleep();
 }
 
 async function selectOption(selector, value, options = {}) {
@@ -203,14 +215,9 @@ async function selectOption(selector, value, options = {}) {
   for (const opt of Array.from(el.options || [])) {
     if (opt.value === target || opt.textContent.trim() === target) { matched = opt; break; }
   }
-  if (!matched) {
-    for (const opt of Array.from(el.options || [])) {
-      if (opt.textContent.trim().includes(target)) { matched = opt; break; }
-    }
-  }
-  if (!matched) throw new Error(`選択肢が見つかりません: "${selector}" に「${target}」が存在しません（カイポケ登録値と不一致の可能性）。`);
-  setNativeValue(el, matched.value);
-  await humanSleep();
+  if (!matched) for (const opt of Array.from(el.options || [])) { if (opt.textContent.trim().includes(target)) { matched = opt; break; } }
+  if (!matched) throw new Error(`選択肢が見つかりません: "${selector}" に「${target}」なし（カイポケ登録値と不一致の可能性）。`);
+  setNativeValue(el, matched.value); await humanSleep();
 }
 
 async function setRadio(selector, options = {}) {
@@ -219,41 +226,129 @@ async function setRadio(selector, options = {}) {
   el.checked = true;
   el.dispatchEvent(new Event('input', { bubbles: true }));
   el.dispatchEvent(new Event('change', { bubbles: true }));
-  safeClick(el);
-  await humanSleep();
+  safeClick(el); await humanSleep();
 }
 
 async function setCheckbox(selector, checked, options = {}) {
   const el = await waitForElement(selector, options);
-  if (el.checked !== !!checked) {
-    await humanSleep();
-    safeClick(el);
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }
+  if (el.checked !== !!checked) { await humanSleep(); safeClick(el); el.dispatchEvent(new Event('change', { bubbles: true })); }
   await humanSleep();
 }
 
 async function setWarekiDate(dateSelectors, warekiStr, options = {}) {
   if (!warekiStr || !dateSelectors) return;
-  const parsed = parseWareki(warekiStr);
-  if (!parsed) throw new Error(`和暦日付の解釈に失敗: "${warekiStr}"（例: 令和8年7月13日）`);
-  await selectOption(dateSelectors.era, parsed.era, options);
-  await selectOption(dateSelectors.year, parsed.year, options);
-  await selectOption(dateSelectors.month, parsed.month, options);
-  await selectOption(dateSelectors.day, parsed.day, options);
+  const p = parseWareki(warekiStr);
+  if (!p) throw new Error(`和暦日付の解釈に失敗: "${warekiStr}"（例: 令和8年7月13日）`);
+  await selectOption(dateSelectors.era, p.era, options);
+  await selectOption(dateSelectors.year, p.year, options);
+  await selectOption(dateSelectors.month, p.month, options);
+  await selectOption(dateSelectors.day, p.day, options);
 }
 function parseWareki(s) {
   const m = String(s).match(/^\s*(明治|大正|昭和|平成|令和)\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日\s*$/);
   return m ? { era: m[1], year: m[2], month: m[3], day: m[4] } : null;
 }
 
+// "08:15" → {hour:'8', min1:'1', min2:'5'}（介護ポップアップの時/分十/分一）
+function splitTime3(t) {
+  const m = t && String(t).match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return { hour: String(parseInt(m[1], 10)), min1: m[2][0], min2: m[2][1] };
+}
+
+// 介護ポップアップ：サービス内容ラジオ（種類選択後にajaxで出現）を表示テキストで選択（無ければ警告してスキップ）
+async function selectServiceContentRadio(boxSel, text) {
+  if (!text) return;
+  let box;
+  try { box = await waitForElement(boxSel, { timeout: 8000, visible: false }); } catch (_) { return; }
+  await humanSleep();
+  const labels = box.querySelectorAll('label');
+  for (const lb of labels) {
+    if (lb.textContent && lb.textContent.trim().includes(text)) {
+      const inp = lb.htmlFor ? box.querySelector(`[id="${lb.htmlFor}"]`) : lb.previousElementSibling;
+      if (inp) { safeClick(inp); await humanSleep(); return; }
+    }
+  }
+  console.warn('サービス内容の選択肢が見つからずスキップ:', text);
+}
+
 // =============================================================
-// 障害（inline）: 全体フローを content.js 内で完結
+// 要介護/要支援（window）: 個別コマンド（background が順序制御）
+// =============================================================
+async function handleFillBasic(profile, basicInfo = {}) {
+  const S = profile.sel;
+  await setWarekiDate(S.createdDate, basicInfo.createdDate);
+  await selectOption(S.insuredProof, basicInfo.insurancePeriod);
+  await fillInput(S.author, basicInfo.author);
+  if (S.communityGeneralSc) await selectOption(S.communityGeneralSc, basicInfo.communityGeneralSc);
+  await selectOption(S.careOffice, basicInfo.careOffice);
+  await selectOption(S.careManager, basicInfo.careManager);
+  await fillInput(S.issues, basicInfo.issues);
+  await fillInput(S.longTerm, basicInfo.longTermGoal);
+  await fillInput(S.shortTerm, basicInfo.shortTermGoal);
+  await fillInput(S.hopePerson, basicInfo.personFamilyHope);
+  await fillInput(S.notes, basicInfo.notes);
+}
+
+async function handleOpenServiceModal(profile) {
+  const btn = await waitForElement(profile.sel.serviceActButton);
+  await humanSleep(); safeClick(btn); await humanSleep(); // 別ウィンドウが開く
+}
+
+// ポップアップ（MEM093104）側のフォーム入力
+async function handleFillServiceKaigo(profile, service = {}) {
+  const P = profile.popupSel;
+  await waitForElement(P.root); await humanSleep();
+  await setRadio(service.insuranceType === '保険外' ? P.insuranceOutside : P.insuranceInside);
+  await selectOption(P.serviceKind, service.serviceType);   // ajaxでサービス内容が読み込まれる
+  await sleep(1000);
+  await selectOption(P.servicePlant, service.serviceOffice);
+  await selectServiceContentRadio(P.serviceContentBox, service.serviceContent);
+  await fillInput(P.unit, service.units);
+  const st = splitTime3(service.startTime), et = splitTime3(service.endTime);
+  if (st) { await selectOption(P.startHour, st.hour); await selectOption(P.startMin1, st.min1); await selectOption(P.startMin2, st.min2); }
+  if (et) { await selectOption(P.endHour, et.hour); await selectOption(P.endMin1, et.min1); await selectOption(P.endMin2, et.min2); }
+  // 提供日（既定=毎週）。第N指定は provisionNthWeek がある場合。
+  if (service.provisionNthWeek) {
+    await setRadio(P.nthRadio);
+    await selectOption(P.weekCount, service.provisionNthWeek); // 例「第1」
+    if (service.provisionDays && service.provisionDays[0]) await selectOption(P.nthDay, service.provisionDays[0] + '曜日');
+  } else {
+    await setRadio(P.weeklyRadio);
+    await selectOption(P.weekType, service.provisionCycle || '毎週');
+    for (const d of (service.provisionDays || [])) await setCheckbox(P.checkedDay(d), true);
+  }
+  const regist = await waitForElement(P.regist);
+  await humanSleep(); safeClick(regist); await humanSleep(); // 保存→成功時ウィンドウは自動で閉じ、親画面がrefreshされる
+}
+
+// 援助内容（listDetail:{S}）に行を入力
+async function handleFillSupport(profile, index, supportDetails = []) {
+  const S = profile.sel.support;
+  const max = S.maxRows || supportDetails.length;
+  for (let i = 0; i < supportDetails.length && i < max; i++) {
+    const d = supportDetails[i], r = i + 1; // 行は1始まり
+    if (d.category) await selectOption(S.division(index, r), d.category, { visible: false });
+    if (d.item) await selectOption(S.item(index, r), d.item, { visible: false });
+    if (d.content) await fillInput(S.content(index, r), d.content, { visible: false });
+    if (d.requiredTime) await fillInput(S.time(index, r), d.requiredTime, { visible: false });
+    if (d.notes) await fillInput(S.notes(index, r), d.notes, { visible: false });
+    await humanSleep();
+  }
+}
+
+async function handleFillFooter(profile, basicInfo = {}) {
+  const S = profile.sel;
+  await setWarekiDate(S.deliveryDate, basicInfo.explainDate);
+  await fillInput(S.explainer, basicInfo.explainer);
+}
+
+// =============================================================
+// 障害（inline）: ページ内で全処理を完結
 // =============================================================
 async function runShogai(profile, payload) {
-  const S = profile.sel;
-  const basic = payload.basicInfo || {};
-  const services = Array.isArray(payload.services) ? payload.services : [];
+  const S = profile.sel, P = profile.popupSel;
+  const basic = payload.basicInfo || {}, services = Array.isArray(payload.services) ? payload.services : [];
 
   // ① 基本情報＋援助目標（区分・相談支援事業所は障害では無いのでスルー）
   await setWarekiDate(S.createdDate, basic.createdDate);
@@ -264,140 +359,51 @@ async function runShogai(profile, payload) {
   // ② サービスごとにインラインポップアップで追加
   for (let i = 0; i < services.length; i++) {
     const svc = services[i];
-
-    // 新規追加する → インラインポップアップ表示
     const addBtn = await waitForElement(S.addServiceButton);
-    await humanSleep();
-    safeClick(addBtn);
-    await humanSleep();
-
-    // ポップアップのフォーム出現待機
-    await waitForElement(S.popup.root);
-    await humanSleep();
-
-    // 保険区分（先に選ぶ：onclickで依存項目がクリアされるため）
-    await setRadio(svc.insuranceType === '保険外' ? S.popup.insuranceOutside : S.popup.insuranceInside);
-    await selectOption(S.popup.serviceKind, svc.serviceType);
-    await selectOption(S.popup.servicePlant, svc.serviceOffice);
-    await fillInput(S.popup.startTime, svc.startTime);
-    await fillInput(S.popup.endTime, svc.endTime);
-    for (const d of (svc.provisionDays || [])) {
-      const v = WEEKDAY_VALUE[d];
-      if (v) await setCheckbox(S.popup.weekday(v), true);
-    }
-
-    // ポップアップの「登録する」でサービスを追加（JSFのajax再描画を待つ）
-    const regist = await waitForElement(S.popup.regist);
-    await humanSleep();
-    safeClick(regist);
-    await sleep(1200); // ajax再描画待ち
-    await humanSleep();
-
-    // 契約支給量（対応する loop 行に入力）※行順=サービス追加順と仮定
+    await humanSleep(); safeClick(addBtn); await humanSleep();
+    await waitForElement(P.root); await humanSleep();
+    await setRadio(svc.insuranceType === '保険外' ? P.insuranceOutside : P.insuranceInside);
+    await selectOption(P.serviceKind, svc.serviceType);
+    await selectOption(P.servicePlant, svc.serviceOffice);
+    await fillInput(P.startTime, svc.startTime);
+    await fillInput(P.endTime, svc.endTime);
+    for (const d of (svc.provisionDays || [])) await setCheckbox(P.checkedDay(d), true);
+    const regist = await waitForElement(P.regist);
+    await humanSleep(); safeClick(regist); await sleep(1200); await humanSleep();
+    // 契約支給量（障害のみ）
     if (svc.contractSupplyQuantity) {
-      try { await fillInput(S.supplyRowQty(i), svc.contractSupplyQuantity, { timeout: 5000 }); }
-      catch (_) { /* 行が未生成/対応不明ならスキップ（安全側） */ }
+      try { await fillInput(S.supplyQty(i), svc.contractSupplyQuantity, { timeout: 5000, visible: false }); } catch (_) {}
     }
   }
 
-  // ③ 援助内容（フラットテーブル form:service:N）に全サービスの明細を順に入力
+  // ③ 援助内容（フラット form:service:N）に全サービスの明細を順に入力
   const details = [];
   services.forEach((svc) => (svc.supportDetails || []).forEach((d) => details.push(d)));
   for (let r = 0; r < details.length; r++) {
     const d = details[r];
-    // 行が足りなければ「行を追加する」
-    if (!document.querySelector(S.supportTime(r))) {
+    if (!document.querySelector(S.support.time(r))) {
       const addRow = document.querySelector(S.addSupportRow);
       if (addRow) { await humanSleep(); safeClick(addRow); await sleep(1000); }
     }
-    if (d.category) await selectOption(S.supportDivision(r), d.category);
-    if (d.item) await selectOption(S.supportItem(r), d.item);
-    if (d.requiredTime) await fillInput(S.supportTime(r), d.requiredTime);
-    if (d.notes) await fillInput(S.supportHeed(r), d.notes);
-    if (d.content) await fillInput(S.supportHope(r), d.content);
+    if (d.category) await selectOption(S.support.division(r), d.category, { visible: false });
+    if (d.item) await selectOption(S.support.item(r), d.item, { visible: false });
+    if (d.requiredTime) await fillInput(S.support.time(r), d.requiredTime, { visible: false });
+    if (d.notes) await fillInput(S.support.notes(r), d.notes, { visible: false });
+    if (d.content) await fillInput(S.support.hope(r), d.content, { visible: false });
     await humanSleep();
   }
 
   // ④ 説明日（作成状態・最終登録は人間）
   await setWarekiDate(S.deliveryDate, basic.explainDate);
-
   return { count: services.length };
 }
 
 // =============================================================
-// 要介護/要支援（window）: 個別コマンド（background が順序制御）※プレースホルダ
-// =============================================================
-async function handleFillBasic(profile, basicInfo = {}) {
-  const S = profile.sel;
-  await setWarekiDate(S.createdDate, basicInfo.createdDate);
-  await selectOption(S.insurancePeriod, basicInfo.insurancePeriod);
-  await fillInput(S.author, basicInfo.author);
-  await selectOption(S.careOffice, basicInfo.careOffice);
-  await selectOption(S.careManager, basicInfo.careManager);
-  await fillInput(S.issues, basicInfo.issues);
-  await fillInput(S.longTerm, basicInfo.longTermGoal);
-  await fillInput(S.shortTerm, basicInfo.shortTermGoal);
-  await fillInput(S.hopePerson, basicInfo.personFamilyHope);
-  await fillInput(S.notes, basicInfo.notes);
-}
-async function handleOpenServiceModal(profile, insuranceType) {
-  const S = profile.sel;
-  const tabSel = insuranceType === '保険外' ? S.tabOutside : S.tabInsurance;
-  try { const tab = await waitForElement(tabSel, { timeout: 4000 }); await humanSleep(); safeClick(tab); await humanSleep(); } catch (_) {}
-  const addBtn = await waitForElement(S.addServiceButton);
-  await humanSleep(); safeClick(addBtn); await humanSleep();
-}
-async function handleFillService(profile, service = {}) {
-  const P = profile.sel.popup;
-  await waitForElement(P.root); await humanSleep();
-  await setRadio(service.insuranceType === '保険外' ? P.insuranceOutside : P.insuranceInside);
-  await selectOption(P.serviceType, service.serviceType);
-  await selectOption(P.serviceOffice, service.serviceOffice);
-  await fillInput(P.serviceContent, service.serviceContent);
-  await fillInput(P.units, service.units);
-  const st = splitTime(service.startTime), et = splitTime(service.endTime);
-  if (st) { await selectOption(P.startHour, st.h); await selectOption(P.startMin, st.m); }
-  if (et) { await selectOption(P.endHour, et.h); await selectOption(P.endMin, et.m); }
-  await setRadio((service.provisionCycle === '第N' || service.provisionNthWeek) ? P.cycleNth : P.cycleWeekly);
-  for (const d of (service.provisionDays || [])) await setCheckbox(P.weekday(d), true);
-  const saveBtn = await waitForElement(P.saveButton);
-  await humanSleep(); safeClick(saveBtn); await humanSleep();
-}
-async function handleFillSupport(profile, index, supportDetails = []) {
-  const S = profile.sel;
-  if (!supportDetails.length) return;
-  const tab = await waitForElement(buildSelector(S.supportTab, { index })); await humanSleep(); safeClick(tab); await humanSleep();
-  const content = await waitForElement(buildSelector(S.supportTabContent, { index })); await humanSleep();
-  for (let r = 0; r < supportDetails.length; r++) {
-    let rows = content.querySelectorAll(S.supportRows);
-    if (r >= rows.length) {
-      const addBtn = content.querySelector(S.addSupportRow);
-      if (!addBtn) throw new Error(`援助内容の行が不足（必要 ${supportDetails.length}/現在 ${rows.length}）。行追加ボタンなし。`);
-      await humanSleep(); safeClick(addBtn); await humanSleep();
-      rows = content.querySelectorAll(S.supportRows);
-    }
-    const row = rows[r], d = supportDetails[r];
-    if (d.category) await selectOption(S.rowCategory, d.category, { root: row });
-    if (d.item) await selectOption(S.rowItem, d.item, { root: row });
-    if (d.content) await fillInput(S.rowContent, d.content, { root: row });
-    if (d.requiredTime) await fillInput(S.rowTime, d.requiredTime, { root: row });
-    if (d.notes) await fillInput(S.rowNotes, d.notes, { root: row });
-    await humanSleep();
-  }
-}
-async function handleFillFooter(profile, basicInfo = {}) {
-  const S = profile.sel;
-  await setWarekiDate(S.deliveryDate, basicInfo.explainDate);
-  await fillInput(S.explainer, basicInfo.explainer);
-}
-function splitTime(t) { const m = t && String(t).match(/^(\d{1,2}):(\d{2})$/); return m ? { h: m[1], m: m[2] } : null; }
-
-// =============================================================
-// 役割判定・初期化・メッセージ受信
+// 役割判定・メッセージ受信
 // =============================================================
 const PROFILE = detectProfile();
 
-// 別ウィンドウ型（要介護/要支援）のサービスポップアップは background に準備完了を通知
+// 別ウィンドウ型サービスポップアップ（介護 MEM093104）は background に準備完了を通知
 if (PROFILE && PROFILE.isServicePopup) {
   const announce = () => chrome.runtime.sendMessage({ type: 'POPUP_READY' }, () => void chrome.runtime.lastError);
   if (document.readyState === 'complete') announce();
@@ -413,15 +419,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         case 'GET_MODE':
           sendResponse({ ok: true, mode: PROFILE.mode, label: PROFILE.label });
           return;
-        case 'RUN_ALL': { // 障害（inline）: 全処理をここで完結
+        case 'RUN_ALL': { // 障害（inline）
           const result = await runShogai(PROFILE, message.payload);
           sendResponse({ ok: true, message: `サービス ${result.count} 件の下書き入力が完了しました。` });
           return;
         }
-        // 以下は 要介護/要支援（window）用の個別コマンド
         case 'FILL_BASIC': await handleFillBasic(PROFILE, message.basicInfo); break;
-        case 'OPEN_SERVICE_MODAL': await handleOpenServiceModal(PROFILE, message.insuranceType); break;
-        case 'FILL_SERVICE': await handleFillService(PROFILE, message.service); break;
+        case 'OPEN_SERVICE_MODAL': await handleOpenServiceModal(PROFILE); break;
+        case 'FILL_SERVICE': await handleFillServiceKaigo(PROFILE, message.service); break;
         case 'FILL_SUPPORT': await handleFillSupport(PROFILE, message.index, message.supportDetails); break;
         case 'FILL_FOOTER': await handleFillFooter(PROFILE, message.basicInfo); break;
         default: throw new Error('未知のコマンド: ' + message.cmd);
@@ -434,18 +439,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ ok: false, message: msg });
     }
   })();
-  return true; // 非同期応答
+  return true;
 });
-
-// FILL_SERVICE は別ウィンドウ側の content.js が受ける（PROFILE.isServicePopup のとき）。
-// その場合 message.service を受けてフォーム入力する。
-if (PROFILE && PROFILE.isServicePopup) {
-  chrome.runtime.onMessage.addListener((message, _s, sendResponse) => {
-    if (!message || message.cmd !== 'FILL_SERVICE') return;
-    (async () => {
-      try { await handleFillService(PROFILE, message.service); sendResponse({ ok: true }); }
-      catch (err) { sendResponse({ ok: false, message: err && err.message ? err.message : String(err) }); }
-    })();
-    return true;
-  });
-}
