@@ -249,6 +249,13 @@ function parseWareki(s) {
   return m ? { era: m[1], year: m[2], month: m[3], day: m[4] } : null;
 }
 
+// "08:15" → "0815"（障害ポップアップの時間テキスト欄・4桁）。既に数字のみなら4桁に整える。
+function toHHMM(t) {
+  if (!t) return t;
+  const s = String(t).replace(/[^0-9]/g, '');
+  return s.length === 3 ? '0' + s : s; // 例 "830"→"0830"
+}
+
 // "08:15" → {hour:'8', min1:'1', min2:'5'}（介護ポップアップの時/分十/分一）
 function splitTime3(t) {
   const m = t && String(t).match(/^(\d{1,2}):(\d{2})$/);
@@ -365,8 +372,9 @@ async function runShogai(profile, payload) {
     await setRadio(svc.insuranceType === '保険外' ? P.insuranceOutside : P.insuranceInside);
     await selectOption(P.serviceKind, svc.serviceType);
     await selectOption(P.servicePlant, svc.serviceOffice);
-    await fillInput(P.startTime, svc.startTime);
-    await fillInput(P.endTime, svc.endTime);
+    // 障害の時間欄はテキスト・4桁（入力例 0900〜1400）。"08:15"→"0815" に正規化して入力。
+    await fillInput(P.startTime, toHHMM(svc.startTime));
+    await fillInput(P.endTime, toHHMM(svc.endTime));
     for (const d of (svc.provisionDays || [])) await setCheckbox(P.checkedDay(d), true);
     const regist = await waitForElement(P.regist);
     await humanSleep(); safeClick(regist); await sleep(1200); await humanSleep();
