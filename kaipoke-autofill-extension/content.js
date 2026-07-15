@@ -711,6 +711,45 @@ async function clickShogaiRegist(el) {
   }
 }
 
+// 保険外（自立支援・移動支援）ポップアップ専用の確実な送信（v2.9.6）。
+// クリック経由だと「ページは正常に再読込されるのにサービスが作成されない」サイレント失敗が
+// 保険外のみで発生した（7/15実機録画＋実HTML解析。保険内は同一ボタン・同一クリック処理で保存成功）。
+// カイポケ側の作り: popupSubmitId=1 のPOSTだけを保存として扱い、0なら黙って破棄する。
+// またJSFは画像ボタンの regist.x パラメータの有無で「押された」を判定する。
+// そこでクリックの既定動作に頼らず、フォームを直接POSTする:
+//   (1) startEndTime隠しフィールドをselect6個から再構成（ページ側editTime2()相当）
+//   (2) popupSubmitId=1 を直接セット
+//   (3) regist.x / regist.y をhiddenで明示付与
+//   (4) form.submit() で全フィールドを確実送信
+// 送信直前のフォーム内容はsessionStorageへ記録し、再読込後のRUN_ALLがconsoleに出す（診断用）。
+async function submitShogaiRegistForm(el) {
+  const form = (el && el.form) || document.getElementById('disableFormPopup');
+  if (!form) { await clickShogaiRegist(el); return; }
+  const g = (id) => document.getElementById('disableFormPopup:' + id);
+  const se = g('startEndTime');
+  if (se && g('startHour')) {
+    se.value = ['startHour', 'startMinute1', 'startMinute2', 'endHour', 'endMinute1', 'endMinute2']
+      .map((k) => { const e2 = g(k); return e2 ? e2.value : ''; }).join(',');
+  }
+  const psi = g('popupSubmitId');
+  if (psi) psi.value = '1';
+  for (const nm of ['disableFormPopup:regist.x', 'disableFormPopup:regist.y']) {
+    if (!form.querySelector(`input[name="${nm}"]`)) {
+      const h = document.createElement('input');
+      h.type = 'hidden'; h.name = nm; h.value = '1';
+      form.appendChild(h);
+    }
+  }
+  try {
+    const fd = new FormData(form); const dump = {};
+    for (const [k, v] of fd.entries()) dump[k] = String(v).slice(0, 200);
+    sessionStorage.setItem('kaipokeAutofillLastPost', JSON.stringify({ at: new Date().toLocaleString('ja-JP'), url: form.action, data: dump }));
+  } catch (_) {}
+  console.log('[kaipoke-autofill] 保険外サービスを form.submit() で送信します（popupSubmitId=1・regist.x付与済み）');
+  await sleep(500);
+  HTMLFormElement.prototype.submit.call(form);
+}
+
 // 保存操作済みサービスの記録（sessionStorage・タブ単位・計画書タイトル単位）。
 // 移動支援（保険外）は保存しても週間計画表（保険内タブ）に行が出ないため、
 // 表の照合だけでは「未入力」と誤判定して同じサービスを繰り返してしまう。
@@ -774,6 +813,11 @@ async function runShogai(profile, payload) {
   const savedSigs = loadSavedSigs();
   const pending = services.filter((svc) => !svcAlreadyEntered(existingRows, svc) && savedSigs.indexOf(svcSig(svc)) < 0);
   console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '保存済み署名:', savedSigs, '未処理:', pending.length);
+  // 前回の保存POST内容（保険外のform.submit()送信時に記録される診断ログ）
+  try {
+    const lp = sessionStorage.getItem('kaipokeAutofillLastPost');
+    if (lp) console.log('[kaipoke-autofill] 前回の保存POST内容（診断用）:', JSON.parse(lp));
+  } catch (_) {}
 
   // ① 基本情報＋援助目標（入力済みサービスが無い＝初回のみ）
   if (!existingRows.length) {
@@ -845,7 +889,7 @@ async function runShogai(profile, payload) {
     }
     if (!regist) throw new Error('サービス設定の保存（登録する）ボタンが見つかりませんでした。ポップアップを×で閉じてから、この画面のスクショをシステム部に送ってください。');
     await humanSleep();
-    return { phase: 'service', registEl: regist, svcNo, remaining: pending.length - 1, skipped, sig: svcSig(svc) };
+    return { phase: 'service', registEl: regist, svcNo, remaining: pending.length - 1, skipped, sig: svcSig(svc), isIdou };
   }
 
   // ④ 全サービス保存済み → 契約支給量・援助内容・説明日を入れて完了
@@ -924,7 +968,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             // クリック直前に「保存操作済み」を記録（ページ遷移で記録し損ねないよう楽観的に先へ書く。
             // 保存が実際に失敗した場合はポップアップが開いたままになり popupStuck 検知で人に知らせる）
             addSavedSig(result.sig);
-            await humanSleep(); await clickShogaiRegist(result.registEl);
+            await humanSleep();
+            // 保険外（移動支援）はクリック経由のサイレント失敗対策としてform直接送信、保険内は実績のあるクリック方式
+            if (result.isIdou) await submitShogaiRegistForm(result.registEl);
+            else await clickShogaiRegist(result.registEl);
             return;
           }
           sendResponse({ ok: true, phase: result.phase, count: result.count || 0, skipped: result.skipped || [], errors: result.errors || [] });
