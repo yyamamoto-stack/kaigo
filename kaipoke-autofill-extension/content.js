@@ -750,6 +750,20 @@ function getPlanId() {
   if (hid && hid.value) return hid.value;
   return 'default';
 }
+// 週間計画表の上部タブ（【保険内】【保険外】【計画予定表】）のうち、指定ラベルのタブへの
+// 切替リンク（aタグ）を返す。現在アクティブなタブは span のみ（aが無い）ので null になる。
+function findPlanTabLink(labelText) {
+  const box = document.querySelector('[id="form:divTab"]') || document;
+  const li = [...box.querySelectorAll('li')].find((l) => {
+    const a = l.querySelector('a');
+    return a && (l.textContent || '').indexOf(labelText) >= 0;
+  });
+  return li ? (li.querySelector('a') || null) : null;
+}
+// 備考欄（計画予定表タブの form:planningCalendarRemarks）が今この画面のDOMにあるか
+const REMARKS_SEL = '[id="form:planningCalendarRemarks"]';
+const isYoteiTabActive = () => !!document.querySelector(REMARKS_SEL);
+
 const idouCounterKey = () => 'kaipokeIdouDone:' + getPlanId();
 function getIdouDone() { try { return parseInt(sessionStorage.getItem(idouCounterKey()) || '0', 10) || 0; } catch (_) { return 0; } }
 function bumpIdouDone() { try { sessionStorage.setItem(idouCounterKey(), String(getIdouDone() + 1)); } catch (_) {} }
@@ -936,9 +950,32 @@ async function runShogai(profile, payload) {
       const a = tabs[k].querySelector('a') || tabs[k];
       return { phase: 'supportSwitch', tabEl: a, next: k + 1, skipped };
     }
-  } else if (services.some(needsSupport)) {
-    // タブが無い＝サービス未登録の画面等。旧フラット方式は誤入力のもとなので入力しない
+  } else if (!isYoteiTabActive() && services.some(needsSupport)) {
+    // タブが無い＝サービス未登録の画面等（計画予定表タブ上でないとき）。旧フラット方式は誤入力のもとなので入力しない
     skipped.push('援助内容: サービスタブが見つからないためスキップしました（サービス登録後に再実行してください）');
+  }
+
+  // ⑤ 備考（【計画予定表】タブの form:planningCalendarRemarks）
+  // 保険内の援助内容が全て済んだあとに、計画予定表タブへ切り替えて備考を入力する。
+  // 備考には「サービス内容欄に書けない注意事項」＋「移動支援(保険外)の曜日・時間・支援内容」を入れる。
+  const remarks = String(basic.remarks || '').trim();
+  if (remarks) {
+    if (!isYoteiTabActive()) {
+      // まだ計画予定表タブでない → 切替（未保存の変更が無いので移動確認は出ない）
+      const yoteiTab = findPlanTabLink('計画予定表');
+      if (yoteiTab) return { phase: 'switchTab', tabEl: yoteiTab, label: '計画予定表', skipped };
+      // タブが見つからなければ備考はスキップ（手動で入力）
+      skipped.push('備考: 計画予定表タブが見つからないためスキップ（手動で入力してください）');
+    } else {
+      const ta = document.querySelector(REMARKS_SEL);
+      if (ta && String(ta.value).trim() !== remarks) {
+        await setTextPersist(REMARKS_SEL, remarks);
+        // 説明日も入れてから停止（説明日欄はタブに関わらずメイン画面にある）
+        await setWarekiDate(S.deliveryDate, basic.explainDate);
+        return { phase: 'remarkFilled', skipped };
+      }
+      // 既に入力済み → 説明日を入れて done へ
+    }
   }
 
   // 説明日（作成状態・最終登録は人間）
@@ -1077,6 +1114,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             // 先に応答を返してからタブをクリックする（backgroundが再読み込みを待って続行する）。
             // このタブは保存済み（未保存の変更なし）でクリックするので移動確認ダイアログは出ない。
             sendResponse({ ok: true, phase: 'supportSwitch', next: result.next, skipped: result.skipped || [] });
+            await humanSleep(); safeClick(result.tabEl);
+            return;
+          }
+          if (result.phase === 'switchTab') {
+            // 週間計画表の上部タブ切替（例: 計画予定表）。フォーム送信＝画面遷移で応答チャネルが
+            // 切れるため先に応答を返してからクリックする。保存済み状態なので移動確認は出ない。
+            sendResponse({ ok: true, phase: 'switchTab', label: result.label || '', skipped: result.skipped || [] });
             await humanSleep(); safeClick(result.tabEl);
             return;
           }
