@@ -750,24 +750,12 @@ async function submitShogaiRegistForm(el) {
   HTMLFormElement.prototype.submit.call(form);
 }
 
-// 保存操作済みサービスの記録（sessionStorage・タブ単位・計画書タイトル単位）。
-// 移動支援（保険外）は保存しても週間計画表（保険内タブ）に行が出ないため、
-// 表の照合だけでは「未入力」と誤判定して同じサービスを繰り返してしまう。
-// そこで「登録する」を押す直前に署名を記録し、表照合とのOR条件で入力済みと判定する。
-const shogaiSavedKey = () => 'kaipokeAutofillSaved:' + (document.title || location.pathname);
-function svcSig(svc) {
-  return [svc.serviceType, svc.startTime, svc.endTime, (svc.provisionDays || []).join('')].join('|');
-}
-function loadSavedSigs() {
-  try { return JSON.parse(sessionStorage.getItem(shogaiSavedKey()) || '[]'); } catch (_) { return []; }
-}
-function addSavedSig(sig) {
-  try {
-    const a = loadSavedSigs();
-    if (a.indexOf(sig) < 0) a.push(sig);
-    sessionStorage.setItem(shogaiSavedKey(), JSON.stringify(a));
-  } catch (_) {}
-}
+// 【v2.9.9】「保存操作済み」のsessionStorage署名記録は廃止した。
+// もともと保険外（移動支援）が週間計画表に出ないための仕組みだったが、保険外を自動登録の
+// 対象外にしたため不要になり、むしろ「同じタブで別の計画書を開くと前の計画書の記録が
+// 効いてサービス登録を全部スキップする」誤爆（キーが計画書タイトル＝利用者名で衝突）を
+// 起こしていた。入力済み判定は週間計画表の実際の行（svcAlreadyEntered）のみで行う。
+// 保存が反映されない場合はbackgroundの「remaining非減少」ガードが停止して人に知らせる。
 
 // 週間計画表の行テキストと照合して、このサービスが入力済みかを判定（backgroundの判定と同じロジック）
 function svcAlreadyEntered(existingRows, svc) {
@@ -810,15 +798,14 @@ async function runShogai(profile, payload) {
   }
 
   const existingRows = getExistingServices();
-  const savedSigs = loadSavedSigs();
   // 【運用変更 2026/07/15】保険外（移動支援）は自動登録の対象外。
   // 保険内サービスが計画書本体として登録済みになる前は、サーバーが保険外の追加登録を
   // 黙って破棄することが判明した（手動でも同様・POST記録で確認済み）。
   // 自動入力は保険内のみを登録し、保険外は人が計画書の「登録する」を押した後に手動で登録する。
   const isIdouSvc = (svc) => String(svc.serviceType || '').indexOf('移動支援') >= 0 || svc.insuranceType === '保険外';
   const idouSvcs = services.filter(isIdouSvc);
-  const pending = services.filter((svc) => !isIdouSvc(svc) && !svcAlreadyEntered(existingRows, svc) && savedSigs.indexOf(svcSig(svc)) < 0);
-  console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '保存済み署名:', savedSigs, '未処理(保険内):', pending.length, '保険外(手動対象):', idouSvcs.length);
+  const pending = services.filter((svc) => !isIdouSvc(svc) && !svcAlreadyEntered(existingRows, svc));
+  console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '未処理(保険内):', pending.length, '保険外(手動対象):', idouSvcs.length);
   // 前回の保存POST内容（保険外のform.submit()送信時に記録される診断ログ）
   try {
     const lp = sessionStorage.getItem('kaipokeAutofillLastPost');
@@ -895,7 +882,7 @@ async function runShogai(profile, payload) {
     }
     if (!regist) throw new Error('サービス設定の保存（登録する）ボタンが見つかりませんでした。ポップアップを×で閉じてから、この画面のスクショをシステム部に送ってください。');
     await humanSleep();
-    return { phase: 'service', registEl: regist, svcNo, remaining: pending.length - 1, skipped, sig: svcSig(svc), isIdou };
+    return { phase: 'service', registEl: regist, svcNo, remaining: pending.length - 1, skipped, isIdou };
   }
 
   // ④ 全サービス保存済み → 契約支給量・援助内容・説明日を入れて完了
@@ -913,13 +900,28 @@ async function runShogai(profile, payload) {
   }
   // 援助内容（フラット form:service:N）に全サービスの明細を順に入力。
   // 区分・項目がマスタ外の値でも止めない：項目は「その他」で代用し、最後に一覧で知らせる
+  // 【v2.9.9】「行を追加する」はページ上部の【契約支給量情報】にも同名リンクがあるため、
+  // 【援助内容】見出しより後ろにあるものだけをクリックする（v2.9.8で契約支給量の行を
+  // 誤って増やす事故が起きた）。行を追加できない場合はクラッシュせずスキップして知らせる。
+  const findSupportAddRow = () => {
+    const adds = [...document.querySelectorAll(S.addSupportRow)];
+    if (!adds.length) return null;
+    const header = [...document.querySelectorAll('th, td, div, p, span, strong, b, h1, h2, h3')]
+      .find((el) => { const t = (el.textContent || '').trim(); return t.length <= 12 && /援助内容|援護内容/.test(t); });
+    if (!header) return null; // 見出しが特定できないときは誤クリックを避けて追加しない
+    return adds.find((el) => header.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) || null;
+  };
   const details = [];
   services.forEach((svc) => (svc.supportDetails || []).forEach((d) => details.push(d)));
   for (let r = 0; r < details.length; r++) {
     const d = details[r];
     if (!document.querySelector(S.support.time(r))) {
-      const addRow = document.querySelector(S.addSupportRow);
+      const addRow = findSupportAddRow();
       if (addRow) { await humanSleep(); safeClick(addRow); await sleep(1000); }
+      if (!document.querySelector(S.support.time(r))) {
+        skipped.push(`援助内容${r + 1}行目以降（${details.length - r}件分）: 入力行を追加できないためスキップしました。手動で「行を追加する」を押して入力してください`);
+        break;
+      }
     }
     const rowTag = `援助内容${r + 1}行目`;
     if (d.category) {
@@ -942,14 +944,10 @@ async function runShogai(profile, payload) {
   }
   // 説明日（作成状態・最終登録は人間）
   await setWarekiDate(S.deliveryDate, basic.explainDate);
-  // 「保存操作の記録(sig)」だけを根拠にスキップし、週間計画表で実在を確認できていないサービス
-  const svcLabel = (svc) => `${svc.serviceType || svc.insuranceType || 'サービス'}（${svc.startTime || '?'}〜${svc.endTime || '?'} ${(svc.provisionDays || []).join('・')}）`;
-  const unverified = services
-    .filter((svc) => !isIdouSvc(svc) && !svcAlreadyEntered(existingRows, svc) && savedSigs.indexOf(svcSig(svc)) >= 0)
-    .map(svcLabel);
   // 保険外（移動支援）は自動登録の対象外＝計画書の「登録する」後に人が手動登録する
+  const svcLabel = (svc) => `${svc.serviceType || svc.insuranceType || 'サービス'}（${svc.startTime || '?'}〜${svc.endTime || '?'} ${(svc.provisionDays || []).join('・')}）`;
   const manualIdou = idouSvcs.map(svcLabel);
-  return { phase: 'done', count: services.length, skipped, unverified, manualIdou };
+  return { phase: 'done', count: services.length, skipped, manualIdou };
 }
 
 // =============================================================
@@ -980,7 +978,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             sendResponse({ ok: true, phase: 'service', svcNo: result.svcNo, remaining: result.remaining, skipped: result.skipped || [] });
             // クリック直前に「保存操作済み」を記録（ページ遷移で記録し損ねないよう楽観的に先へ書く。
             // 保存が実際に失敗した場合はポップアップが開いたままになり popupStuck 検知で人に知らせる）
-            addSavedSig(result.sig);
             await humanSleep();
             // 保険外（移動支援）はクリック経由のサイレント失敗対策としてform直接送信、保険内は実績のあるクリック方式
             if (result.isIdou) await submitShogaiRegistForm(result.registEl);

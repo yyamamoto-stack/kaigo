@@ -367,9 +367,6 @@ async function startAutofill(payload, mainTabId) {
       if (r.manualIdou && r.manualIdou.length) {
         message += `\n\n📝【保険外（移動支援）${r.manualIdou.length}件は手動登録です】保険内が計画書として登録済みになる前は、カイポケが保険外の追加を受け付けないため、自動登録の対象外にしています。\n① まずご自身で計画書の「登録する」を押す\n② 編集画面に戻り、【保険外】タブの「新規追加する」から次の内容を手動で登録してください：\n・` + r.manualIdou.join('\n・');
       }
-      if (r.unverified && r.unverified.length) {
-        message += '\n\n🔴【要確認】次のサービスは保存操作を行った記録がありますが、画面上で登録を確認できていません。週間計画表を確認し、無ければ手動で追加してください：\n・' + r.unverified.join('\n・');
-      }
       break;
     }
     if (allSkipped.length) {
