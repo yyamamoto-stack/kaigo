@@ -208,8 +208,21 @@ function pageExec(code) {
 // これらのリンクは押すと結局フォームを送信して入力を保存するため、確認は不要。
 // ページ側の getInputVars() を呼んで「変更前の基準値」を今の値に取り直せば checkChange() が
 // trueを返し、dirtyCheckA4J() は確認を出さずそのまま送信する（＝入力は保存される）。
+// 【v2.10.2】v2.10.1の getInputVars() 再ベースライン方式は実機で効かなかったため、
+// より確実にページ側の dirtyCheckA4J を「常にfalse（＝確認を出さず送信続行）」へ差し替える。
+// window.onbeforeunload も無効化。注入が実行されたか sessionStorage マーカーで確認できる。
 function suppressDirtyCheck() {
-  pageExec('if(typeof getInputVars==="function"){getInputVars();} if(typeof ignoreChange!=="undefined"){ignoreChange=true;}');
+  pageExec(`
+    try {
+      if (!window.__kaipokeDirtyPatched) {
+        window.__kaipokeDirtyPatched = true;
+        window.dirtyCheckA4J = function(){ return false; };
+        try { window.onbeforeunload = null; } catch(e){}
+      }
+      sessionStorage.setItem('kaipokeAutofillInject','ok');
+    } catch(e){ try { sessionStorage.setItem('kaipokeAutofillInject','err:'+(e&&e.message)); } catch(_){} }
+  `);
+  try { console.log('[kaipoke-autofill] dirtyチェック抑止の注入結果:', sessionStorage.getItem('kaipokeAutofillInject')); } catch (_) {}
 }
 
 function setNativeValue(element, value) {
@@ -794,6 +807,10 @@ async function runShogai(profile, payload) {
   const S = profile.sel, P = profile.popupSel;
   const basic = payload.basicInfo || {}, services = Array.isArray(payload.services) ? payload.services : [];
   const skipped = []; // 自動選択できなかった項目（完了メッセージで利用者に知らせる）
+
+  // このページ読み込みの間、dirtyチェックの移動確認ダイアログを抑止する（サービス追加ボタン・
+  // 援助内容タブのクリックで毎回出るため。ページ再読込ごとに再注入される＝runShogaiの都度呼ぶ）。
+  suppressDirtyCheck();
 
   // 前回の「登録する」が完了しておらずインラインポップアップが開いたままなら、
   // 同じ入力を繰り返さずに停止して人に知らせる（未入力の必須項目やバリデーションエラーの可能性）。
