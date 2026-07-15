@@ -916,24 +916,27 @@ async function runShogai(profile, payload) {
   //   ・表示中タブが入力済み → 次の（明細のある）タブへ切替（supportSwitch）。保存済みで
   //     未保存の変更が無いので、タブ送信リンクを押しても移動確認ダイアログは出ない。
   //   ・後続タブが全て入力済み → 説明日を入れて done
-  // タブk = orderedServices[k]（保険内→移動支援の登録順）。移動支援の援助内容タブもここで入力する。
+  // タブk = orderedServices[k]（保険内→移動支援の登録順）。
+  // 【運用ルール 2026/07/16】保険外（移動支援）は援助内容を入力しない（ユーザー指示）。
+  //   → 保険外サービスのタブは needsSupport=false としてスキップする。
+  const needsSupport = (svc) => svc && !isIdouSvc(svc) && (svc.supportDetails || []).length > 0;
   const tabs = [...document.querySelectorAll('#idTabService li')];
 
   if (tabs.length) {
     const activeIdx = Math.max(0, tabs.findIndex((li) => String(li.className || '').indexOf('tab-on') >= 0));
     const cur = orderedServices[activeIdx];
     // 表示中タブが未入力なら、入力して停止（人が「登録する」で保存）
-    if (cur && (cur.supportDetails || []).length && !supportTabFilled(S, cur)) {
+    if (needsSupport(cur) && !supportTabFilled(S, cur)) {
       await fillShogaiSupportTab(S, cur, activeIdx, skipped);
       return { phase: 'supportFilled', tabNo: activeIdx + 1, skipped };
     }
-    // 表示中タブは済み（or 明細なし）→ 次の明細ありタブへ切替
+    // 表示中タブは済み（or 明細なし・保険外）→ 次の入力が必要なタブへ切替
     for (let k = activeIdx + 1; k < Math.min(tabs.length, orderedServices.length); k++) {
-      if (!(orderedServices[k].supportDetails || []).length) continue;
+      if (!needsSupport(orderedServices[k])) continue;
       const a = tabs[k].querySelector('a') || tabs[k];
       return { phase: 'supportSwitch', tabEl: a, next: k + 1, skipped };
     }
-  } else if (services.some((svc) => (svc.supportDetails || []).length)) {
+  } else if (services.some(needsSupport)) {
     // タブが無い＝サービス未登録の画面等。旧フラット方式は誤入力のもとなので入力しない
     skipped.push('援助内容: サービスタブが見つからないためスキップしました（サービス登録後に再実行してください）');
   }
