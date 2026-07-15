@@ -936,7 +936,12 @@ async function runShogai(profile, payload) {
   }
   // 説明日（作成状態・最終登録は人間）
   await setWarekiDate(S.deliveryDate, basic.explainDate);
-  return { phase: 'done', count: services.length, skipped };
+  // 「保存操作の記録(sig)」だけを根拠にスキップし、週間計画表で実在を確認できていないサービス
+  // （移動支援＝保険外は保険内タブの表に出ないため、保存成否を画面から検証できない）
+  const unverified = services
+    .filter((svc) => !svcAlreadyEntered(existingRows, svc) && savedSigs.indexOf(svcSig(svc)) >= 0)
+    .map((svc) => `${svc.serviceType || svc.insuranceType || 'サービス'}（${svc.startTime || '?'}〜${svc.endTime || '?'} ${(svc.provisionDays || []).join('・')}）`);
+  return { phase: 'done', count: services.length, skipped, unverified };
 }
 
 // =============================================================

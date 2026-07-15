@@ -22,6 +22,36 @@
 // 進捗通知：ポップアップUI（PROGRESS）とアイコンバッジの両方に反映する。
 // ポップアップが閉じていて届かなくてもエラーにしない（バッジは常に見える）。
 // -------------------------------------------------------------
+// -------------------------------------------------------------
+// 【診断・v2.9.7】計画書画面へのPOST内容を記録する（直近10件・ローカル保存のみ／外部送信なし）。
+// 移動支援（保険外）の保存が「エラーなしで反映されない」問題の原因特定のため、
+// 手動の「登録する」と自動入力それぞれの実際のPOSTパラメータを見比べられるようにする。
+// ポップアップUIの「診断ログをコピー」ボタンでこの記録をコピーできる。
+// -------------------------------------------------------------
+try {
+  chrome.webRequest.onBeforeRequest.addListener((details) => {
+    try {
+      if (details.method !== 'POST' || !details.requestBody) return;
+      const fd = details.requestBody.formData;
+      let data = null;
+      if (fd) {
+        data = {};
+        for (const k of Object.keys(fd)) data[k] = fd[k].map((v) => String(v).slice(0, 300));
+      } else if (details.requestBody.raw) {
+        data = { raw: '(未解析 ' + details.requestBody.raw.length + ' パート)' };
+      }
+      chrome.storage.local.get({ kaipokePostLog: [] }, (st) => {
+        const log = Array.isArray(st.kaipokePostLog) ? st.kaipokePostLog : [];
+        log.push({ at: new Date().toLocaleString('ja-JP'), url: details.url, type: details.type, data });
+        while (log.length > 10) log.shift();
+        chrome.storage.local.set({ kaipokePostLog: log });
+      });
+    } catch (_) {}
+  }, { urls: ['https://*.kaipoke.biz/kaipokebiz/business/plan_document/*'] }, ['requestBody']);
+} catch (e) {
+  console.warn('POST診断ログの初期化に失敗:', e && e.message);
+}
+
 function reportProgress(percent, label) {
   const pct = Math.max(0, Math.min(100, Math.round(percent)));
   try {
@@ -334,6 +364,9 @@ async function startAutofill(payload, mainTabId) {
       }
       // done: 契約支給量・援助内容・説明日まで完了
       message = `全サービス${r.count}件の下書き入力が完了しました。援助内容・説明日まで入力済みです。目視確認のうえ、作成状態を「作成済」にしてご自身で「登録する」を押してください。`;
+      if (r.unverified && r.unverified.length) {
+        message += '\n\n🔴【要確認】次のサービスは保存操作を行った記録がありますが、画面上で登録を確認できていません（保険外サービスは【保険外】タブにしか表示されないためです）。必ず【保険外】タブを開いて確認し、無ければ手動で追加してください：\n・' + r.unverified.join('\n・');
+      }
       break;
     }
     if (allSkipped.length) {
