@@ -735,6 +735,25 @@ async function clickShogaiRegist(el) {
 // 起こしていた。入力済み判定は週間計画表の実際の行（svcAlreadyEntered）のみで行う。
 // 保存が反映されない場合はbackgroundの「remaining非減少」ガードが停止して人に知らせる。
 
+// 移動支援（保険外）の登録済み件数を、この計画書ごとに sessionStorage で数える。
+// 保険外サービスは【保険内】タブの週間計画表に出ず、援助内容タブの見え方も画面状態で
+// 変わるため、DOMだけでは登録済み数を確実に数えにくい。そこで「登録するボタンを押した回数」を
+// 計画書の内部ID（homeCareEtcPlanInternalId・利用者/計画ごとに一意）をキーにして記録する。
+// ※旧sig方式はキーが計画書タイトル（利用者名）で別計画書と衝突したが、これは内部IDキーで衝突しない。
+function getPlanId() {
+  const el = document.querySelector('[onclick*="homeCareEtcPlanInternalId"]');
+  if (el) {
+    const m = (el.getAttribute('onclick') || '').match(/homeCareEtcPlanInternalId['"]?\s*:\s*['"]?(\d+)/);
+    if (m) return m[1];
+  }
+  const hid = document.querySelector('input[name*="omeCareEtcPlanInternalId"], input[id*="omeCareEtcPlanInternalId"]');
+  if (hid && hid.value) return hid.value;
+  return 'default';
+}
+const idouCounterKey = () => 'kaipokeIdouDone:' + getPlanId();
+function getIdouDone() { try { return parseInt(sessionStorage.getItem(idouCounterKey()) || '0', 10) || 0; } catch (_) { return 0; } }
+function bumpIdouDone() { try { sessionStorage.setItem(idouCounterKey(), String(getIdouDone() + 1)); } catch (_) {} }
+
 // 週間計画表の行テキストと照合して、このサービスが入力済みかを判定（backgroundの判定と同じロジック）
 function svcAlreadyEntered(existingRows, svc) {
   const st = String(svc.startTime || ''), et = String(svc.endTime || '');
@@ -784,9 +803,9 @@ async function runShogai(profile, payload) {
   const idouSvcs = services.filter(isIdouSvc);               // 保険外＝移動支援（登録順）
   const orderedServices = [...nonIdou, ...idouSvcs];          // 実際の登録順＝援助内容タブの並び順
   const pending = nonIdou.filter((svc) => !svcAlreadyEntered(existingRows, svc)); // 未登録の保険内
-  // 保険外の登録済み数＝援助内容タブ数 − 保険内の件数（保険内が全部載ってから数える）
-  const tabCountNow = document.querySelectorAll('#idTabService li').length;
-  const idouDone = pending.length ? 0 : Math.max(0, tabCountNow - nonIdou.length);
+  // 保険外（移動支援）の登録済み数は、計画書ごとのカウンタ（「登録する」を押した回数）で数える。
+  // 保険内が全て載ってから移動支援に進む（pendingがある間は0扱い）。
+  const idouDone = pending.length ? 0 : getIdouDone();
   const idouPending = idouSvcs.slice(idouDone);
   console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '未処理(保険内):', pending.length, '移動支援 登録済:', idouDone, '/', idouSvcs.length);
 
@@ -1043,6 +1062,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             // 保険内サービスの保存クリックでページ全体が再読み込みされ応答チャネルが切れるため、
             // 先に応答を返してから実際の「登録する」ボタンをクリックする
             sendResponse({ ok: true, phase: 'service', svcNo: result.svcNo, remaining: result.remaining, kind: result.kind || '', skipped: result.skipped || [] });
+            // 移動支援は「登録するを押した回数」を計画書ごとに記録し、再実行時に登録済みをスキップする
+            // （保険外は週間計画表(保険内タブ)に出ないためDOMで数えられない。ページ遷移前に先に記録）
+            if (result.kind === '移動支援') bumpIdouDone();
             await humanSleep();
             await clickShogaiRegist(result.registEl);
             return;

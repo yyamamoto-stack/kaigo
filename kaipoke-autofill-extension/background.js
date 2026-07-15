@@ -346,8 +346,16 @@ async function startAutofill(payload, mainTabId) {
         }
         prevRemaining = r.remaining;
         const done = total - (r.remaining || 0);
-        const kindLabel = r.kind === '移動支援' ? '移動支援（保険外）' : '保険内サービス';
-        reportProgress(5 + (done / Math.max(1, total)) * 75, `${kindLabel} サービス${r.svcNo}を保存しました（残り${r.remaining}件）。画面の更新を待っています…`);
+        // 移動支援（保険外）は、サービス設定を保存しても計画書の「登録する」を押すまで
+        // 援助内容タブ等に反映されず、続けて処理すると重複追加エラーになる（実機確認 7/16）。
+        // そのため保存後は一旦停止し、人が計画書の「登録する」を押してから再実行してもらう。
+        if (r.kind === '移動支援') {
+          reportProgress(80, '移動支援（保険外）を登録しました。画面の更新を待っています…');
+          await new Promise((res) => setTimeout(res, 6000)); // content側の保存クリック完了を待つ
+          message = '移動支援（保険外）のサービスを登録しました。ここで一旦停止します。\n\n【次の手順】\n① 内容を確認して、ご自身で計画書の「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ 残りの移動支援や援助内容の入力に進みます（登録済みは自動でスキップ）。\n\n※移動支援は保存だけでは援助内容タブに反映されないため、1件ごとに「登録する」を押す運用にしています。';
+          break;
+        }
+        reportProgress(5 + (done / Math.max(1, total)) * 75, `保険内サービス サービス${r.svcNo}を保存しました（残り${r.remaining}件）。画面の更新を待っています…`);
         // content側の「登録する」クリックはリトライ込みで最大6秒ほどかかるため、先にその分を待つ
         await new Promise((res) => setTimeout(res, 6000));
         await waitForContentReady(mainTabId); // 保存によるページ再読み込み→content.js再注入を待つ
