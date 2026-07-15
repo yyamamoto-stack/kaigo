@@ -192,37 +192,29 @@ function waitForElement(selector, options = {}) {
   });
 }
 
-// ページ（メインワールド）のJSを実行する。content.jsはisolated worldのため、カイポケの
-// グローバル関数（getInputVars等）を直接呼べない。scriptタグを差し込んで実行し即除去する。
-function pageExec(code) {
-  try {
-    const s = document.createElement('script');
-    s.textContent = `(function(){try{${code}}catch(e){console.warn('[kaipoke-autofill] pageExec失敗',e);}})();`;
-    (document.head || document.documentElement).appendChild(s);
-    s.remove();
-  } catch (e) { console.warn('[kaipoke-autofill] pageExec注入失敗', e && e.message); }
-}
-
 // 【v2.10.1】カイポケのdirtyチェック（入力変更後にフォーム送信リンク＝サービス追加ボタンや
 // 援助内容タブを踏むと「このページからほかのページに移動しますか？」の確認が出る）を回避する。
 // これらのリンクは押すと結局フォームを送信して入力を保存するため、確認は不要。
 // ページ側の getInputVars() を呼んで「変更前の基準値」を今の値に取り直せば checkChange() が
 // trueを返し、dirtyCheckA4J() は確認を出さずそのまま送信する（＝入力は保存される）。
-// 【v2.10.2】v2.10.1の getInputVars() 再ベースライン方式は実機で効かなかったため、
-// より確実にページ側の dirtyCheckA4J を「常にfalse（＝確認を出さず送信続行）」へ差し替える。
-// window.onbeforeunload も無効化。注入が実行されたか sessionStorage マーカーで確認できる。
+// 【v2.10.3】カイポケはCSP `script-src 'self'` でインラインスクリプトを禁止しており、
+// content.jsからのインライン注入（pageExec）はブロックされる（v2.10.2の実機エラーで確定）。
+// そこでメインワールド用コードを拡張機能同梱の【外部ファイル injected.js】として読み込む
+// （CSPの許可リストに拡張機能オリジンが入るため外部ファイルなら実行できる。
+// manifestのweb_accessible_resourcesに登録済み）。injected.jsがdirtyCheckA4Jを無効化する。
+// 外部スクリプトの読み込みは非同期のため、実際のクリックまでには余裕（fill処理のsleep）がある。
+let __dirtyInjected = false;
 function suppressDirtyCheck() {
-  pageExec(`
-    try {
-      if (!window.__kaipokeDirtyPatched) {
-        window.__kaipokeDirtyPatched = true;
-        window.dirtyCheckA4J = function(){ return false; };
-        try { window.onbeforeunload = null; } catch(e){}
-      }
-      sessionStorage.setItem('kaipokeAutofillInject','ok');
-    } catch(e){ try { sessionStorage.setItem('kaipokeAutofillInject','err:'+(e&&e.message)); } catch(_){} }
-  `);
-  try { console.log('[kaipoke-autofill] dirtyチェック抑止の注入結果:', sessionStorage.getItem('kaipokeAutofillInject')); } catch (_) {}
+  if (__dirtyInjected) return; // 同一ページ読み込み内での二重注入を防ぐ
+  __dirtyInjected = true;
+  try {
+    const s = document.createElement('script');
+    s.src = chrome.runtime.getURL('injected.js');
+    s.onload = () => s.remove();
+    (document.head || document.documentElement).appendChild(s);
+  } catch (e) { console.warn('[kaipoke-autofill] injected.jsの読み込み失敗', e && e.message); }
+  // 注入の成否（CSPで弾かれていないか）は少し後にsessionStorageで確認できる
+  setTimeout(() => { try { console.log('[kaipoke-autofill] dirtyチェック抑止の注入結果:', sessionStorage.getItem('kaipokeAutofillInject')); } catch (_) {} }, 500);
 }
 
 function setNativeValue(element, value) {
