@@ -22,35 +22,8 @@
 // 進捗通知：ポップアップUI（PROGRESS）とアイコンバッジの両方に反映する。
 // ポップアップが閉じていて届かなくてもエラーにしない（バッジは常に見える）。
 // -------------------------------------------------------------
-// -------------------------------------------------------------
-// 【診断・v2.9.7】計画書画面へのPOST内容を記録する（直近10件・ローカル保存のみ／外部送信なし）。
-// 移動支援（保険外）の保存が「エラーなしで反映されない」問題の原因特定のため、
-// 手動の「登録する」と自動入力それぞれの実際のPOSTパラメータを見比べられるようにする。
-// ポップアップUIの「診断ログをコピー」ボタンでこの記録をコピーできる。
-// -------------------------------------------------------------
-try {
-  chrome.webRequest.onBeforeRequest.addListener((details) => {
-    try {
-      if (details.method !== 'POST' || !details.requestBody) return;
-      const fd = details.requestBody.formData;
-      let data = null;
-      if (fd) {
-        data = {};
-        for (const k of Object.keys(fd)) data[k] = fd[k].map((v) => String(v).slice(0, 300));
-      } else if (details.requestBody.raw) {
-        data = { raw: '(未解析 ' + details.requestBody.raw.length + ' パート)' };
-      }
-      chrome.storage.local.get({ kaipokePostLog: [] }, (st) => {
-        const log = Array.isArray(st.kaipokePostLog) ? st.kaipokePostLog : [];
-        log.push({ at: new Date().toLocaleString('ja-JP'), url: details.url, type: details.type, data });
-        while (log.length > 10) log.shift();
-        chrome.storage.local.set({ kaipokePostLog: log });
-      });
-    } catch (_) {}
-  }, { urls: ['https://*.kaipoke.biz/kaipokebiz/business/plan_document/*'] }, ['requestBody']);
-} catch (e) {
-  console.warn('POST診断ログの初期化に失敗:', e && e.message);
-}
+// 【v2.11.0】計画書画面へのPOST内容を記録するwebRequest診断機能は撤去した。
+// カイポケの通信内容の記録は「解析目的の通信傍受」に読めるため、社内遵守事項に沿って行わない。
 
 function reportProgress(percent, label) {
   const pct = Math.max(0, Math.min(100, Math.round(percent)));
@@ -347,9 +320,25 @@ async function startAutofill(payload, mainTabId) {
       if (r.phase === 'popupStuck') {
         throw new Error('サービス設定のポップアップが開いたままで、保存（登録する）が完了していません。ポップアップ内のエラー表示や未入力の必須項目（サービス内容・時間・提供曜日など）を確認し、手動で「登録する」を押してから、同じJSONでもう一度実行してください（入力済みは自動スキップされます）。\n※保存せず×で閉じた場合、そのサービスは今回の自動入力の対象から外れるため、必要ならカイポケで手動追加してください。');
       }
-      if (r.phase === 'needSaveFirst') {
-        message = 'ここで一旦停止しました（エラーではありません。カイポケの新規画面ではサービス追加ができない仕様のため）。\n\n【再開のしかた】\n① ご自身で「登録する」を押して保存する\n② 保存後に開く編集画面で、同じJSONのままもう一度「自動入力を実行」を押す\n→ 保険内のサービス・援助内容・説明日まで自動入力されます。\n\n💡次回からのおすすめ: 新規画面では何も入力せず先に「登録する」を押し、編集画面になってから「自動入力を実行」を押すと、途中停止なしで最後まで進みます。';
+      if (r.phase === 'needSaveFirst' || r.phase === 'needBasicSave') {
+        message = '基本情報を入力しました。ここで一旦停止します（エラーではありません）。\n\n【再開のしかた】\n① 内容を確認して、ご自身で「登録する」を押して保存する\n② 保存後の編集画面で、同じJSONのままもう一度「自動入力を実行」を押す\n→ 保険内のサービスが1件ずつ自動で追加されます。\n\n※カイポケでは、基本情報を保存する前にサービスを追加しようとすると「移動しますか？」の確認が出るため、先に保存する運用にしています。';
         break;
+      }
+      if (r.phase === 'supportFilled') {
+        // 援助内容タブを1枚入力して停止（人が「登録する」で保存してから再実行）。
+        message = `サービス${r.tabNo}の援助内容を入力しました。ここで一旦停止します。\n\n【次の手順】\n① 内容を確認して、ご自身で「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ 次のサービスの援助内容に進みます（入力済みは自動でスキップ）。\n\n※タブを切り替えるだけでは前のタブの入力が保存されないため、1サービスごとに「登録する」を押す運用にしています。`;
+        break;
+      }
+      if (r.phase === 'supportSwitch') {
+        // 援助内容のタブ切替（保存済みの状態で切替＝移動確認は出ない）。進んでいなければ停止
+        if (typeof r.next === 'number' && r.next <= prevSupportNext) {
+          throw new Error(`援助内容のサービス${r.next}タブへの切替が進みません。ページを再読み込みして、同じJSONのままもう一度実行してください（入力済みのタブは自動スキップされます）。`);
+        }
+        prevSupportNext = r.next;
+        reportProgress(85, `援助内容: サービス${r.next}のタブに切り替えています…`);
+        await new Promise((res) => setTimeout(res, 2000));
+        await waitForContentReady(mainTabId); // タブ切替による画面遷移→content.js再注入を待つ
+        continue;
       }
       if (r.phase === 'service') {
         if (typeof r.remaining === 'number' && r.remaining >= prevRemaining) {
@@ -363,21 +352,10 @@ async function startAutofill(payload, mainTabId) {
         await waitForContentReady(mainTabId); // 保存によるページ再読み込み→content.js再注入を待つ
         continue;
       }
-      if (r.phase === 'supportTab') {
-        // 援助内容のタブ切替（フォーム全体の再送信＝画面遷移）。進んでいなければ停止する
-        if (typeof r.next === 'number' && r.next <= prevSupportNext) {
-          throw new Error(`援助内容のサービス${r.next}タブへの切替が進みません。ページを再読み込みして、同じJSONのままもう一度実行してください（入力済みのタブは自動スキップされます）。`);
-        }
-        prevSupportNext = r.next;
-        reportProgress(80 + (r.next / Math.max(1, total)) * 10, `援助内容: サービス${r.next}のタブに切り替えています…`);
-        await new Promise((res) => setTimeout(res, 2000));
-        await waitForContentReady(mainTabId); // タブ切替による画面遷移→content.js再注入を待つ
-        continue;
-      }
-      // done: 契約支給量・援助内容・説明日まで完了（保険外は自動登録の対象外）
+      // done: 保険内サービス・援助内容・説明日まで完了（保険外は自動登録の対象外）
       message = `保険内サービスの下書き入力が完了しました。援助内容・説明日まで入力済みです。目視確認のうえ、作成状態を「作成済」にしてご自身で「登録する」を押してください。`;
       if (r.manualIdou && r.manualIdou.length) {
-        message += `\n\n📝【保険外（移動支援）${r.manualIdou.length}件は手動登録です】保険内が計画書として登録済みになる前は、カイポケが保険外の追加を受け付けないため、自動登録の対象外にしています。\n① まずご自身で計画書の「登録する」を押す\n② 編集画面に戻り、【保険外】タブの「新規追加する」から次の内容を手動で登録してください（登録後に増えるサービスタブの援助内容も手動入力）：\n・` + r.manualIdou.join('\n・');
+        message += `\n\n📝【保険外（移動支援）${r.manualIdou.length}件は手動登録です】自動入力の対象外にしています。計画書を「登録する」で保存したあと、編集画面の【保険外】タブの「新規追加する」から次の内容を手動で登録してください（追加後に増えるサービスタブの援助内容も手動入力）：\n・` + r.manualIdou.join('\n・');
       }
       break;
     }

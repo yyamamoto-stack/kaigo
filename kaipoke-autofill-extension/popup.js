@@ -86,26 +86,6 @@ document.getElementById("clearBtn").addEventListener("click", () => {
   setStatus("JSONデータをクリアしました。原案作成アプリで作成したJSONを貼り付けてください。", "info");
 });
 
-// 「診断ログをコピー」（v2.9.7）
-// backgroundが記録した計画書画面へのPOST内容（直近10件）をクリップボードへコピーする。
-// 移動支援（保険外）の保存不具合調査用：手動登録の成功POSTと自動入力のPOSTを比較する。
-document.getElementById("diagBtn").addEventListener("click", () => {
-  chrome.storage.local.get({ kaipokePostLog: [] }, async (st) => {
-    const log = Array.isArray(st.kaipokePostLog) ? st.kaipokePostLog : [];
-    if (!log.length) {
-      setStatus("診断ログはまだありません。カイポケの計画書画面で保存操作（手動または自動入力）を行うと記録されます。", "info");
-      return;
-    }
-    const text = JSON.stringify(log, null, 2);
-    try {
-      await navigator.clipboard.writeText(text);
-      setStatus(`診断ログ（POST記録 ${log.length}件）をコピーしました。そのままチャットに貼り付けてシステム部（Claude）に渡してください。`, "ok");
-    } catch (e) {
-      setStatus("クリップボードへのコピーに失敗しました：" + e.message, "error");
-    }
-  });
-});
-
 // 「自動入力を実行」
 document.getElementById("runBtn").addEventListener("click", async () => {
   const raw = document.getElementById("jsonInput").value.trim();

@@ -192,30 +192,14 @@ function waitForElement(selector, options = {}) {
   });
 }
 
-// 【v2.10.1】カイポケのdirtyチェック（入力変更後にフォーム送信リンク＝サービス追加ボタンや
-// 援助内容タブを踏むと「このページからほかのページに移動しますか？」の確認が出る）を回避する。
-// これらのリンクは押すと結局フォームを送信して入力を保存するため、確認は不要。
-// ページ側の getInputVars() を呼んで「変更前の基準値」を今の値に取り直せば checkChange() が
-// trueを返し、dirtyCheckA4J() は確認を出さずそのまま送信する（＝入力は保存される）。
-// 【v2.10.3】カイポケはCSP `script-src 'self'` でインラインスクリプトを禁止しており、
-// content.jsからのインライン注入（pageExec）はブロックされる（v2.10.2の実機エラーで確定）。
-// そこでメインワールド用コードを拡張機能同梱の【外部ファイル injected.js】として読み込む
-// （CSPの許可リストに拡張機能オリジンが入るため外部ファイルなら実行できる。
-// manifestのweb_accessible_resourcesに登録済み）。injected.jsがdirtyCheckA4Jを無効化する。
-// 外部スクリプトの読み込みは非同期のため、実際のクリックまでには余裕（fill処理のsleep）がある。
-let __dirtyInjected = false;
-function suppressDirtyCheck() {
-  if (__dirtyInjected) return; // 同一ページ読み込み内での二重注入を防ぐ
-  __dirtyInjected = true;
-  try {
-    const s = document.createElement('script');
-    s.src = chrome.runtime.getURL('injected.js');
-    s.onload = () => s.remove();
-    (document.head || document.documentElement).appendChild(s);
-  } catch (e) { console.warn('[kaipoke-autofill] injected.jsの読み込み失敗', e && e.message); }
-  // 注入の成否（CSPで弾かれていないか）は少し後にsessionStorageで確認できる
-  setTimeout(() => { try { console.log('[kaipoke-autofill] dirtyチェック抑止の注入結果:', sessionStorage.getItem('kaipokeAutofillInject')); } catch (_) {} }, 500);
-}
+// 【v2.11.0・コンプライアンス方針】カイポケの内部JS（dirtyCheckA4J等）を書き換えて
+// 「このページからほかのページに移動しますか？」の確認を抑止する処理は撤去した。
+// カイポケ自動化の社内遵守事項「公開されている画面操作の範囲内に留める／内部プログラムへの
+// 直接アクセス・改変はしない」に沿うため、確認ダイアログが出ない“操作の順序”で回避する：
+//   フォーム送信リンク（サービス追加ボタン・援助内容タブ）は【未保存の変更が無い状態でのみ】
+//   クリックする。具体的には、基本情報を入れたら一旦人が「登録する」で保存し、以後の追加操作は
+//   保存済み（＝未保存の変更なし）の状態で行う。入力欄は既に同じ値なら書き換えない（下記fillInput）
+//   ことで、再実行時に不要な変更＝dirty状態を作らない。
 
 function setNativeValue(element, value) {
   if (!element) throw new Error('setNativeValue: 対象要素が null です。');
@@ -242,6 +226,8 @@ function safeClick(element) {
 async function fillInput(selector, value, options = {}) {
   if (value === undefined || value === null || value === '') return;
   const el = await waitForElement(selector, options);
+  // 既に同じ値なら書き換えない（再実行時に不要なdirty状態＝移動確認ダイアログの原因を作らない）
+  if (String(el.value) === String(value)) return;
   await humanSleep(); setNativeValue(el, String(value)); await humanSleep();
 }
 
@@ -736,44 +722,11 @@ async function clickShogaiRegist(el) {
   }
 }
 
-// 保険外（自立支援・移動支援）ポップアップ専用の確実な送信（v2.9.6）。
-// クリック経由だと「ページは正常に再読込されるのにサービスが作成されない」サイレント失敗が
-// 保険外のみで発生した（7/15実機録画＋実HTML解析。保険内は同一ボタン・同一クリック処理で保存成功）。
-// カイポケ側の作り: popupSubmitId=1 のPOSTだけを保存として扱い、0なら黙って破棄する。
-// またJSFは画像ボタンの regist.x パラメータの有無で「押された」を判定する。
-// そこでクリックの既定動作に頼らず、フォームを直接POSTする:
-//   (1) startEndTime隠しフィールドをselect6個から再構成（ページ側editTime2()相当）
-//   (2) popupSubmitId=1 を直接セット
-//   (3) regist.x / regist.y をhiddenで明示付与
-//   (4) form.submit() で全フィールドを確実送信
-// 送信直前のフォーム内容はsessionStorageへ記録し、再読込後のRUN_ALLがconsoleに出す（診断用）。
-async function submitShogaiRegistForm(el) {
-  const form = (el && el.form) || document.getElementById('disableFormPopup');
-  if (!form) { await clickShogaiRegist(el); return; }
-  const g = (id) => document.getElementById('disableFormPopup:' + id);
-  const se = g('startEndTime');
-  if (se && g('startHour')) {
-    se.value = ['startHour', 'startMinute1', 'startMinute2', 'endHour', 'endMinute1', 'endMinute2']
-      .map((k) => { const e2 = g(k); return e2 ? e2.value : ''; }).join(',');
-  }
-  const psi = g('popupSubmitId');
-  if (psi) psi.value = '1';
-  for (const nm of ['disableFormPopup:regist.x', 'disableFormPopup:regist.y']) {
-    if (!form.querySelector(`input[name="${nm}"]`)) {
-      const h = document.createElement('input');
-      h.type = 'hidden'; h.name = nm; h.value = '1';
-      form.appendChild(h);
-    }
-  }
-  try {
-    const fd = new FormData(form); const dump = {};
-    for (const [k, v] of fd.entries()) dump[k] = String(v).slice(0, 200);
-    sessionStorage.setItem('kaipokeAutofillLastPost', JSON.stringify({ at: new Date().toLocaleString('ja-JP'), url: form.action, data: dump }));
-  } catch (_) {}
-  console.log('[kaipoke-autofill] 保険外サービスを form.submit() で送信します（popupSubmitId=1・regist.x付与済み）');
-  await sleep(500);
-  HTMLFormElement.prototype.submit.call(form);
-}
+// 【v2.11.0】保険外の合成POST送信（submitShogaiRegistForm）は撤去した。
+// popupSubmitId=1やregist.xを自前で組み立てて form.submit() する処理は「人がボタンを押す
+// 画面操作」を超えており、社内遵守事項に照らして行わない。保険外（移動支援）はそもそも
+// 自動登録の対象外（人が手動登録）。保険内サービスの保存は実際の「登録する」ボタンの
+// クリック（clickShogaiRegist）のみで行う。
 
 // 【v2.9.9】「保存操作済み」のsessionStorage署名記録は廃止した。
 // もともと保険外（移動支援）が週間計画表に出ないための仕組みだったが、保険外を自動登録の
@@ -799,10 +752,6 @@ async function runShogai(profile, payload) {
   const S = profile.sel, P = profile.popupSel;
   const basic = payload.basicInfo || {}, services = Array.isArray(payload.services) ? payload.services : [];
   const skipped = []; // 自動選択できなかった項目（完了メッセージで利用者に知らせる）
-
-  // このページ読み込みの間、dirtyチェックの移動確認ダイアログを抑止する（サービス追加ボタン・
-  // 援助内容タブのクリックで毎回出るため。ページ再読込ごとに再注入される＝runShogaiの都度呼ぶ）。
-  suppressDirtyCheck();
 
   // 前回の「登録する」が完了しておらずインラインポップアップが開いたままなら、
   // 同じ入力を繰り返さずに停止して人に知らせる（未入力の必須項目やバリデーションエラーの可能性）。
@@ -835,24 +784,32 @@ async function runShogai(profile, payload) {
   const idouSvcs = services.filter(isIdouSvc);
   const pending = services.filter((svc) => !isIdouSvc(svc) && !svcAlreadyEntered(existingRows, svc));
   console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '未処理(保険内):', pending.length, '保険外(手動対象):', idouSvcs.length);
-  // 前回の保存POST内容（保険外のform.submit()送信時に記録される診断ログ）
-  try {
-    const lp = sessionStorage.getItem('kaipokeAutofillLastPost');
-    if (lp) console.log('[kaipoke-autofill] 前回の保存POST内容（診断用）:', JSON.parse(lp));
-  } catch (_) {}
 
   // ① 基本情報＋援助目標（入力済みサービスが無い＝初回のみ）
   if (!existingRows.length) {
+    // 入力前に基本情報が「空だった」か記録する（今回このrunで初めて入れたかの判定に使う）
+    const goalEl = document.querySelector(S.assistanceGoal);
+    const wasEmpty = !(goalEl && String(goalEl.value || '').trim());
     // 作成年月日（必須欄）：JSONの作成日を入れる。解釈できない場合は実行日（今日）
     await setWarekiDate(S.createdDate, basic.createdDate, { fallbackToday: true });
     await fillInput(S.author, basic.author);
     await fillInput(S.hopePerson, basic.personFamilyHope || basic.hopePerson);
     await fillInput(S.assistanceGoal, basic.assistanceGoal || basic.longTermGoal);
-  }
+    // 契約支給量も基本情報と一緒に入れて、まとめて人が「登録する」で保存する
+    await fillContractQuantities(S, services, skipped);
 
-  // ② サービス追加ボタンが無い（＝新規画面。保存が先）なら、基本情報だけ入れて案内して終了
-  if (pending.length && !(await hasAddServiceButton())) {
-    return { phase: 'needSaveFirst' };
+    // ② サービス追加ボタンが無い（＝新規画面。保存が先）なら案内して終了
+    if (pending.length && !(await hasAddServiceButton())) {
+      return { phase: 'needSaveFirst' };
+    }
+    // ②' 編集画面だが基本情報を今回このrunで初めて入れた場合、サービス追加の前に人が保存する。
+    //     未保存のままサービス追加ボタン（フォーム送信リンク）を押すと移動確認ダイアログが
+    //     出てしまうため（内部関数の書き換えはしない方針）。保存後に再実行すれば続きから進む。
+    const hasBasicData = !!(basic.assistanceGoal || basic.longTermGoal || basic.author ||
+      basic.personFamilyHope || basic.hopePerson || basic.createdDate);
+    if (wasEmpty && hasBasicData && pending.length) {
+      return { phase: 'needBasicSave' };
+    }
   }
 
   // ③ 未保存サービスがあれば「1件だけ」入力する（保存クリックは呼び出し側＝応答後）
@@ -867,8 +824,7 @@ async function runShogai(profile, payload) {
     const svc = pending[0];
     const svcNo = services.indexOf(svc) + 1; // JSON上のサービス番号（1始まり。保険外を除外しても番号がずれないように）
     const addBtn = await waitForElement(S.addServiceButton);
-    // 基本情報入力後にこのボタン（フォーム送信リンク）を押すとdirty確認が出るため事前に抑止
-    suppressDirtyCheck();
+    // ここに来る時点で基本情報は保存済み（未保存の変更なし）＝送信リンクを押しても移動確認は出ない
     await humanSleep(); safeClick(addBtn); await humanSleep();
     await waitForElement(P.root); await humanSleep();
     const isIdou = String(svc.serviceType || '').indexOf('移動支援') >= 0 || svc.insuranceType === '保険外';
@@ -922,46 +878,34 @@ async function runShogai(profile, payload) {
     return { phase: 'service', registEl: regist, svcNo, remaining: pending.length - 1, skipped, isIdou };
   }
 
-  // ④ 全サービス保存済み → 契約支給量 → 援助内容（サービスNタブごと）→ 説明日
-  // 【v2.10.0】障害の援助内容は「サービスN」タブ式（実HTML: div#idTabService、タブ切替は
-  // oamSubmitFormのフル送信＝画面遷移）。form:service:R は「表示中タブのR行目」を指す。
-  // 旧実装は全サービスの明細をサービス1のタブに詰め込んでいた（7/15実機で発覚）。
-  // 1回のRUN_ALLで「表示中タブ1枚だけ」入力し、次のタブへは応答後にクリックして
-  // backgroundが再読み込みをまたいで継続する（サービス保存と同じ方式）。
+  // ④ 全サービス保存済み → 援助内容（サービスNタブごと）→ 説明日
+  // 【v2.11.0】障害の援助内容は「サービスN」タブ式（実HTML: div#idTabService）。
+  // タブ切替（oamSubmitFormのフル送信）だけでは前タブの入力が保存されず消えるため、
+  // 【1タブ入力するごとに人が「登録する」で保存する】運用にする（ユーザー指示 7/15）。
+  //   ・表示中タブが未入力 → そのタブを入力して停止（supportFilled）＝人が「登録する」→再実行
+  //   ・表示中タブが入力済み → 次の（明細のある）タブへ切替（supportSwitch）。保存済みで
+  //     未保存の変更が無いので、タブ送信リンクを押しても移動確認ダイアログは出ない。
+  //   ・後続タブが全て入力済み → 説明日を入れて done
   const tabs = [...document.querySelectorAll('#idTabService li')];
-  const activeIdx = tabs.findIndex((li) => String(li.className || '').indexOf('tab-on') >= 0);
   const nonIdou = services.filter((svc) => !isIdouSvc(svc)); // タブk = k番目の保険内サービス（登録順）
 
-  // 契約支給量は最初のタブ表示時に1回だけ入力（各ページに常に表示されている）
-  if (activeIdx <= 0) {
-    for (let i = 0; i < services.length; i++) {
-      const svc = services[i];
-      if (!svc.contractSupplyQuantity) continue;
-      // 契約支給量は数値（時間/月）のみ。AIが区分名（身体介護等）を出した場合は書き込まない
-      const q = z2h(String(svc.contractSupplyQuantity)).trim();
-      if (/^[0-9]+(\.[0-9]+)?$/.test(q)) {
-        try { await fillInput(S.supplyQty(i), q, { timeout: 5000, visible: false }); } catch (_) {}
-      } else {
-        skipped.push(`契約支給量（${i + 1}行目）: 「${svc.contractSupplyQuantity}」は数値でないため未入力（手動で時間数を入れてください）`);
-      }
+  if (tabs.length) {
+    const activeIdx = Math.max(0, tabs.findIndex((li) => String(li.className || '').indexOf('tab-on') >= 0));
+    const cur = nonIdou[activeIdx];
+    // 表示中タブが未入力なら、入力して停止（人が「登録する」で保存）
+    if (cur && (cur.supportDetails || []).length && !supportTabFilled(S, cur)) {
+      await fillShogaiSupportTab(S, cur, activeIdx, skipped);
+      return { phase: 'supportFilled', tabNo: activeIdx + 1, skipped };
     }
-  }
-
-  // 表示中タブの援助内容を入力
-  if (tabs.length && activeIdx >= 0 && activeIdx < nonIdou.length) {
-    await fillShogaiSupportTab(S, nonIdou[activeIdx], activeIdx, skipped);
-    // 次に入力が必要なタブがあれば、応答後にタブをクリックして続きはbackgroundに任せる
+    // 表示中タブは済み（or 明細なし）→ 次の明細ありタブへ切替
     for (let k = activeIdx + 1; k < Math.min(tabs.length, nonIdou.length); k++) {
-      if ((nonIdou[k].supportDetails || []).length) {
-        const a = tabs[k].querySelector('a') || tabs[k];
-        return { phase: 'supportTab', tabEl: a, next: k + 1, skipped };
-      }
+      if (!(nonIdou[k].supportDetails || []).length) continue;
+      const a = tabs[k].querySelector('a') || tabs[k];
+      return { phase: 'supportSwitch', tabEl: a, next: k + 1, skipped };
     }
-  } else if (!tabs.length) {
+  } else if (services.some((svc) => !isIdouSvc(svc) && (svc.supportDetails || []).length)) {
     // タブが無い＝サービス未登録の画面等。旧フラット方式は誤入力のもとなので入力しない
-    if (services.some((svc) => (svc.supportDetails || []).length)) {
-      skipped.push('援助内容: サービスタブが見つからないためスキップしました（サービス登録後に再実行してください）');
-    }
+    skipped.push('援助内容: サービスタブが見つからないためスキップしました（サービス登録後に再実行してください）');
   }
 
   // 説明日（作成状態・最終登録は人間）
@@ -970,6 +914,33 @@ async function runShogai(profile, payload) {
   const svcLabel = (svc) => `${svc.serviceType || svc.insuranceType || 'サービス'}（${svc.startTime || '?'}〜${svc.endTime || '?'} ${(svc.provisionDays || []).join('・')}）`;
   const manualIdou = idouSvcs.map(svcLabel);
   return { phase: 'done', count: services.length, skipped, manualIdou };
+}
+
+// 契約支給量（form:loop:N:contractSupplyQuantity）を入力する。数値（時間/月）のみ書き込む。
+async function fillContractQuantities(S, services, skipped) {
+  for (let i = 0; i < services.length; i++) {
+    const svc = services[i];
+    if (!svc.contractSupplyQuantity) continue;
+    const q = z2h(String(svc.contractSupplyQuantity)).trim();
+    if (/^[0-9]+(\.[0-9]+)?$/.test(q)) {
+      try { await fillInput(S.supplyQty(i), q, { timeout: 5000, visible: false }); } catch (_) {}
+    } else {
+      skipped.push(`契約支給量（${i + 1}行目）: 「${svc.contractSupplyQuantity}」は数値でないため未入力（手動で時間数を入れてください）`);
+    }
+  }
+}
+
+// 表示中の援助内容タブが、そのサービスの明細で既に埋まっているか（所要時間・本人家族欄で判定）
+function supportTabFilled(S, svc) {
+  const details = svc.supportDetails || [];
+  if (!details.length) return true;
+  return details.every((d, r) => {
+    const t = document.querySelector(S.support.time(r));
+    const h = document.querySelector(S.support.hope(r));
+    const timeOk = !d.requiredTime || (t && String(t.value).trim() === String(d.requiredTime).trim());
+    const hopeOk = !d.content || (h && String(h.value).trim() === String(d.content).trim());
+    return timeOk && hopeOk;
+  });
 }
 
 // テキスト/テキストエリアに値を入れて blur を発火し、カイポケのonblurのajax（ajaxSingle）で
@@ -1061,26 +1032,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         case 'RUN_ALL': { // 障害（inline）: 1フェーズだけ進めて応答する（backgroundが繰り返し呼ぶ）
           const result = await runShogai(PROFILE, message.payload);
           if (result.phase === 'service') {
-            // 保存クリックでページ全体が再読み込みされ応答チャネルが切れるため、先に応答を返す
+            // 保険内サービスの保存クリックでページ全体が再読み込みされ応答チャネルが切れるため、
+            // 先に応答を返してから実際の「登録する」ボタンをクリックする
             sendResponse({ ok: true, phase: 'service', svcNo: result.svcNo, remaining: result.remaining, skipped: result.skipped || [] });
-            // クリック直前に「保存操作済み」を記録（ページ遷移で記録し損ねないよう楽観的に先へ書く。
-            // 保存が実際に失敗した場合はポップアップが開いたままになり popupStuck 検知で人に知らせる）
             await humanSleep();
-            // 保険外（移動支援）はクリック経由のサイレント失敗対策としてform直接送信、保険内は実績のあるクリック方式
-            if (result.isIdou) await submitShogaiRegistForm(result.registEl);
-            else await clickShogaiRegist(result.registEl);
+            await clickShogaiRegist(result.registEl);
             return;
           }
-          if (result.phase === 'supportTab') {
+          if (result.phase === 'supportSwitch') {
             // 援助内容タブの切替はフォーム全体の再送信＝画面遷移になり応答チャネルが切れるため、
-            // 先に応答を返してからタブをクリックする（backgroundが再読み込みを待って続行する）
-            sendResponse({ ok: true, phase: 'supportTab', next: result.next, skipped: result.skipped || [] });
-            // タブ切替は入力変更後のフォーム送信リンク→dirty確認が出るため事前に抑止
-            suppressDirtyCheck();
+            // 先に応答を返してからタブをクリックする（backgroundが再読み込みを待って続行する）。
+            // このタブは保存済み（未保存の変更なし）でクリックするので移動確認ダイアログは出ない。
+            sendResponse({ ok: true, phase: 'supportSwitch', next: result.next, skipped: result.skipped || [] });
             await humanSleep(); safeClick(result.tabEl);
             return;
           }
-          sendResponse({ ok: true, phase: result.phase, count: result.count || 0, skipped: result.skipped || [], errors: result.errors || [] });
+          sendResponse({ ok: true, phase: result.phase, count: result.count || 0, tabNo: result.tabNo || 0, skipped: result.skipped || [], manualIdou: result.manualIdou || [], errors: result.errors || [] });
           return;
         }
         case 'HAS_ADD_BUTTON': sendResponse({ ok: true, has: await hasAddServiceButton() }); return;
