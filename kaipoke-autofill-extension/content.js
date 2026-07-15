@@ -192,6 +192,26 @@ function waitForElement(selector, options = {}) {
   });
 }
 
+// ページ（メインワールド）のJSを実行する。content.jsはisolated worldのため、カイポケの
+// グローバル関数（getInputVars等）を直接呼べない。scriptタグを差し込んで実行し即除去する。
+function pageExec(code) {
+  try {
+    const s = document.createElement('script');
+    s.textContent = `(function(){try{${code}}catch(e){console.warn('[kaipoke-autofill] pageExec失敗',e);}})();`;
+    (document.head || document.documentElement).appendChild(s);
+    s.remove();
+  } catch (e) { console.warn('[kaipoke-autofill] pageExec注入失敗', e && e.message); }
+}
+
+// 【v2.10.1】カイポケのdirtyチェック（入力変更後にフォーム送信リンク＝サービス追加ボタンや
+// 援助内容タブを踏むと「このページからほかのページに移動しますか？」の確認が出る）を回避する。
+// これらのリンクは押すと結局フォームを送信して入力を保存するため、確認は不要。
+// ページ側の getInputVars() を呼んで「変更前の基準値」を今の値に取り直せば checkChange() が
+// trueを返し、dirtyCheckA4J() は確認を出さずそのまま送信する（＝入力は保存される）。
+function suppressDirtyCheck() {
+  pageExec('if(typeof getInputVars==="function"){getInputVars();} if(typeof ignoreChange!=="undefined"){ignoreChange=true;}');
+}
+
 function setNativeValue(element, value) {
   if (!element) throw new Error('setNativeValue: 対象要素が null です。');
   const proto = Object.getPrototypeOf(element);
@@ -838,6 +858,8 @@ async function runShogai(profile, payload) {
     const svc = pending[0];
     const svcNo = services.indexOf(svc) + 1; // JSON上のサービス番号（1始まり。保険外を除外しても番号がずれないように）
     const addBtn = await waitForElement(S.addServiceButton);
+    // 基本情報入力後にこのボタン（フォーム送信リンク）を押すとdirty確認が出るため事前に抑止
+    suppressDirtyCheck();
     await humanSleep(); safeClick(addBtn); await humanSleep();
     await waitForElement(P.root); await humanSleep();
     const isIdou = String(svc.serviceType || '').indexOf('移動支援') >= 0 || svc.insuranceType === '保険外';
@@ -861,7 +883,13 @@ async function runShogai(profile, payload) {
         await soft('サービス区分', '重度訪問介護（障害支援区分６）');
         await soft('訪問先', '居宅');
       } else {
-        await soft('サービス区分', svc.serviceCategory);
+        // サービス区分は単一選択。AIが「身体介護,家事援助」等と複数返した場合は先頭を採用する
+        // （1サービス＝1区分。両方必要なら本来サービスを分ける。区分名を1つに絞れば必須エラー回避）
+        const cat = String(svc.serviceCategory || '').split(/[,、，/／・]/)[0].trim();
+        if (String(svc.serviceCategory || '').split(/[,、，/／・]/).length > 1) {
+          skipped.push(tag(`サービス区分は「${cat}」を採用（JSONに複数「${svc.serviceCategory}」→先頭のみ・要目視）`));
+        }
+        await soft('サービス区分', cat);
       }
       await soft('重複', '1人目');
       if (svc.twoPersons) await soft('派遣人数', '2人');
@@ -1038,6 +1066,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             // 援助内容タブの切替はフォーム全体の再送信＝画面遷移になり応答チャネルが切れるため、
             // 先に応答を返してからタブをクリックする（backgroundが再読み込みを待って続行する）
             sendResponse({ ok: true, phase: 'supportTab', next: result.next, skipped: result.skipped || [] });
+            // タブ切替は入力変更後のフォーム送信リンク→dirty確認が出るため事前に抑止
+            suppressDirtyCheck();
             await humanSleep(); safeClick(result.tabEl);
             return;
           }
