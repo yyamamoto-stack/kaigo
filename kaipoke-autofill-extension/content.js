@@ -811,8 +811,14 @@ async function runShogai(profile, payload) {
 
   const existingRows = getExistingServices();
   const savedSigs = loadSavedSigs();
-  const pending = services.filter((svc) => !svcAlreadyEntered(existingRows, svc) && savedSigs.indexOf(svcSig(svc)) < 0);
-  console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '保存済み署名:', savedSigs, '未処理:', pending.length);
+  // 【運用変更 2026/07/15】保険外（移動支援）は自動登録の対象外。
+  // 保険内サービスが計画書本体として登録済みになる前は、サーバーが保険外の追加登録を
+  // 黙って破棄することが判明した（手動でも同様・POST記録で確認済み）。
+  // 自動入力は保険内のみを登録し、保険外は人が計画書の「登録する」を押した後に手動で登録する。
+  const isIdouSvc = (svc) => String(svc.serviceType || '').indexOf('移動支援') >= 0 || svc.insuranceType === '保険外';
+  const idouSvcs = services.filter(isIdouSvc);
+  const pending = services.filter((svc) => !isIdouSvc(svc) && !svcAlreadyEntered(existingRows, svc) && savedSigs.indexOf(svcSig(svc)) < 0);
+  console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '保存済み署名:', savedSigs, '未処理(保険内):', pending.length, '保険外(手動対象):', idouSvcs.length);
   // 前回の保存POST内容（保険外のform.submit()送信時に記録される診断ログ）
   try {
     const lp = sessionStorage.getItem('kaipokeAutofillLastPost');
@@ -843,7 +849,7 @@ async function runShogai(profile, payload) {
   //   保険外: 【分類】=移動支援／サービス内容=「移動支援0円（1回0円）」／金額は触らない
   if (pending.length) {
     const svc = pending[0];
-    const svcNo = services.length - pending.length + 1; // 画面上のサービス番号（1始まり）
+    const svcNo = services.indexOf(svc) + 1; // JSON上のサービス番号（1始まり。保険外を除外しても番号がずれないように）
     const addBtn = await waitForElement(S.addServiceButton);
     await humanSleep(); safeClick(addBtn); await humanSleep();
     await waitForElement(P.root); await humanSleep();
@@ -937,11 +943,13 @@ async function runShogai(profile, payload) {
   // 説明日（作成状態・最終登録は人間）
   await setWarekiDate(S.deliveryDate, basic.explainDate);
   // 「保存操作の記録(sig)」だけを根拠にスキップし、週間計画表で実在を確認できていないサービス
-  // （移動支援＝保険外は保険内タブの表に出ないため、保存成否を画面から検証できない）
+  const svcLabel = (svc) => `${svc.serviceType || svc.insuranceType || 'サービス'}（${svc.startTime || '?'}〜${svc.endTime || '?'} ${(svc.provisionDays || []).join('・')}）`;
   const unverified = services
-    .filter((svc) => !svcAlreadyEntered(existingRows, svc) && savedSigs.indexOf(svcSig(svc)) >= 0)
-    .map((svc) => `${svc.serviceType || svc.insuranceType || 'サービス'}（${svc.startTime || '?'}〜${svc.endTime || '?'} ${(svc.provisionDays || []).join('・')}）`);
-  return { phase: 'done', count: services.length, skipped, unverified };
+    .filter((svc) => !isIdouSvc(svc) && !svcAlreadyEntered(existingRows, svc) && savedSigs.indexOf(svcSig(svc)) >= 0)
+    .map(svcLabel);
+  // 保険外（移動支援）は自動登録の対象外＝計画書の「登録する」後に人が手動登録する
+  const manualIdou = idouSvcs.map(svcLabel);
+  return { phase: 'done', count: services.length, skipped, unverified, manualIdou };
 }
 
 // =============================================================
