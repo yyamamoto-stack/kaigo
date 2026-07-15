@@ -342,21 +342,19 @@ async function startAutofill(payload, mainTabId) {
       }
       if (r.phase === 'service') {
         if (typeof r.remaining === 'number' && r.remaining >= prevRemaining) {
-          throw new Error(`サービス${r.svcNo}の保存が反映されていません（同じサービスを繰り返し処理しようとしたため停止しました）。カイポケの週間計画表と【保険外】タブを確認し、同じサービスが二重に登録されていたら余分を削除してください。確認後、同じJSONでもう一度実行すると続きから再開します。`);
+          throw new Error(`サービス${r.svcNo}（${r.kind || 'サービス'}）の保存が反映されていません（同じサービスを繰り返し処理しようとしたため停止しました）。カイポケの週間計画表（【保険内】【保険外】両タブ）を確認し、同じサービスが二重に登録されていたら余分を削除してください。確認後、同じJSONでもう一度実行すると続きから再開します。`);
         }
         prevRemaining = r.remaining;
         const done = total - (r.remaining || 0);
-        reportProgress(5 + (done / Math.max(1, total)) * 75, `サービス${r.svcNo}を保存しました（残り${r.remaining}件）。画面の更新を待っています…`);
+        const kindLabel = r.kind === '移動支援' ? '移動支援（保険外）' : '保険内サービス';
+        reportProgress(5 + (done / Math.max(1, total)) * 75, `${kindLabel} サービス${r.svcNo}を保存しました（残り${r.remaining}件）。画面の更新を待っています…`);
         // content側の「登録する」クリックはリトライ込みで最大6秒ほどかかるため、先にその分を待つ
         await new Promise((res) => setTimeout(res, 6000));
         await waitForContentReady(mainTabId); // 保存によるページ再読み込み→content.js再注入を待つ
         continue;
       }
-      // done: 保険内サービス・援助内容・説明日まで完了（保険外は自動登録の対象外）
-      message = `保険内サービスの下書き入力が完了しました。援助内容・説明日まで入力済みです。目視確認のうえ、作成状態を「作成済」にしてご自身で「登録する」を押してください。`;
-      if (r.manualIdou && r.manualIdou.length) {
-        message += `\n\n📝【保険外（移動支援）${r.manualIdou.length}件は手動登録です】自動入力の対象外にしています。計画書を「登録する」で保存したあと、編集画面の【保険外】タブの「新規追加する」から次の内容を手動で登録してください（追加後に増えるサービスタブの援助内容も手動入力）：\n・` + r.manualIdou.join('\n・');
-      }
+      // done: 保険内＋移動支援（保険外）のサービス・援助内容・説明日まで完了
+      message = `サービス（保険内・移動支援）と援助内容・説明日の下書き入力が完了しました。目視確認のうえ、作成状態を「作成済」にしてご自身で「登録する」を押してください。\n\n※移動支援（保険外）は【保険外】タブで登録内容をご確認ください。`;
       break;
     }
     if (allSkipped.length) {

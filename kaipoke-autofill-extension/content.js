@@ -776,14 +776,19 @@ async function runShogai(profile, payload) {
   }
 
   const existingRows = getExistingServices();
-  // 【運用変更 2026/07/15】保険外（移動支援）は自動登録の対象外。
-  // 保険内サービスが計画書本体として登録済みになる前は、サーバーが保険外の追加登録を
-  // 黙って破棄することが判明した（手動でも同様・POST記録で確認済み）。
-  // 自動入力は保険内のみを登録し、保険外は人が計画書の「登録する」を押した後に手動で登録する。
+  // 保険内（居宅介護等）と保険外（移動支援）を分ける。登録は保険内→保険外の順で行う
+  // （保険外は保険内が計画書に載ってから追加する。保険外は「保険内タブ」の週間計画表には出ないため、
+  //  登録済み数は援助内容の「サービスN」タブ数＝#idTabService li で数える／実クリックのみで実装）。
   const isIdouSvc = (svc) => String(svc.serviceType || '').indexOf('移動支援') >= 0 || svc.insuranceType === '保険外';
-  const idouSvcs = services.filter(isIdouSvc);
-  const pending = services.filter((svc) => !isIdouSvc(svc) && !svcAlreadyEntered(existingRows, svc));
-  console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '未処理(保険内):', pending.length, '保険外(手動対象):', idouSvcs.length);
+  const nonIdou = services.filter((svc) => !isIdouSvc(svc)); // 保険内（登録順＝JSON順）
+  const idouSvcs = services.filter(isIdouSvc);               // 保険外＝移動支援（登録順）
+  const orderedServices = [...nonIdou, ...idouSvcs];          // 実際の登録順＝援助内容タブの並び順
+  const pending = nonIdou.filter((svc) => !svcAlreadyEntered(existingRows, svc)); // 未登録の保険内
+  // 保険外の登録済み数＝援助内容タブ数 − 保険内の件数（保険内が全部載ってから数える）
+  const tabCountNow = document.querySelectorAll('#idTabService li').length;
+  const idouDone = pending.length ? 0 : Math.max(0, tabCountNow - nonIdou.length);
+  const idouPending = idouSvcs.slice(idouDone);
+  console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '未処理(保険内):', pending.length, '移動支援 登録済:', idouDone, '/', idouSvcs.length);
 
   // ① 基本情報＋援助目標（入力済みサービスが無い＝初回のみ）
   if (!existingRows.length) {
@@ -798,8 +803,9 @@ async function runShogai(profile, payload) {
     // 契約支給量も基本情報と一緒に入れて、まとめて人が「登録する」で保存する
     await fillContractQuantities(S, services, skipped);
 
+    const anyToAdd = pending.length || idouPending.length; // 追加するサービスが保険内/移動支援いずれかある
     // ② サービス追加ボタンが無い（＝新規画面。保存が先）なら案内して終了
-    if (pending.length && !(await hasAddServiceButton())) {
+    if (anyToAdd && !(await hasAddServiceButton())) {
       return { phase: 'needSaveFirst' };
     }
     // ②' 編集画面だが基本情報を今回このrunで初めて入れた場合、サービス追加の前に人が保存する。
@@ -807,7 +813,7 @@ async function runShogai(profile, payload) {
     //     出てしまうため（内部関数の書き換えはしない方針）。保存後に再実行すれば続きから進む。
     const hasBasicData = !!(basic.assistanceGoal || basic.longTermGoal || basic.author ||
       basic.personFamilyHope || basic.hopePerson || basic.createdDate);
-    if (wasEmpty && hasBasicData && pending.length) {
+    if (wasEmpty && hasBasicData && anyToAdd) {
       return { phase: 'needBasicSave' };
     }
   }
@@ -820,9 +826,14 @@ async function runShogai(profile, payload) {
   //     共通        : 重複=原則「1人目」。派遣人数=2人同時作業(twoPersons)の場合のみ「2人」（通常は「-」のまま触らない）
   //                   資格・運転・深夜の巡回型派遣分離・事業所と同一の建物の利用者減算は触らない
   //   保険外: 【分類】=移動支援／サービス内容=「移動支援0円（1回0円）」／金額は触らない
-  if (pending.length) {
-    const svc = pending[0];
-    const svcNo = services.indexOf(svc) + 1; // JSON上のサービス番号（1始まり。保険外を除外しても番号がずれないように）
+  // 追加対象を決める：まず保険内（pending）、保険内が全て載ったら移動支援（idouPending）。
+  // remaining は「あと何件追加が残っているか」の総数（保険内＋移動支援）で、単調に減るようにする
+  // （backgroundの「進んでいない」検知が保険内→保険外の切替でも誤動作しないように）。
+  const svcToAdd = pending.length ? pending[0] : (idouPending.length ? idouPending[0] : null);
+  const totalRemainingAfter = (pending.length + idouPending.length) - 1;
+  if (svcToAdd) {
+    const svc = svcToAdd;
+    const svcNo = services.indexOf(svc) + 1; // JSON上のサービス番号（1始まり）
     const addBtn = await waitForElement(S.addServiceButton);
     // ここに来る時点で基本情報は保存済み（未保存の変更なし）＝送信リンクを押しても移動確認は出ない
     await humanSleep(); safeClick(addBtn); await humanSleep();
@@ -875,7 +886,7 @@ async function runShogai(profile, payload) {
     }
     if (!regist) throw new Error('サービス設定の保存（登録する）ボタンが見つかりませんでした。ポップアップを×で閉じてから、この画面のスクショをシステム部に送ってください。');
     await humanSleep();
-    return { phase: 'service', registEl: regist, svcNo, remaining: pending.length - 1, skipped, isIdou };
+    return { phase: 'service', registEl: regist, svcNo, remaining: totalRemainingAfter, skipped, isIdou, kind: isIdou ? '移動支援' : '保険内' };
   }
 
   // ④ 全サービス保存済み → 援助内容（サービスNタブごと）→ 説明日
@@ -886,34 +897,31 @@ async function runShogai(profile, payload) {
   //   ・表示中タブが入力済み → 次の（明細のある）タブへ切替（supportSwitch）。保存済みで
   //     未保存の変更が無いので、タブ送信リンクを押しても移動確認ダイアログは出ない。
   //   ・後続タブが全て入力済み → 説明日を入れて done
+  // タブk = orderedServices[k]（保険内→移動支援の登録順）。移動支援の援助内容タブもここで入力する。
   const tabs = [...document.querySelectorAll('#idTabService li')];
-  const nonIdou = services.filter((svc) => !isIdouSvc(svc)); // タブk = k番目の保険内サービス（登録順）
 
   if (tabs.length) {
     const activeIdx = Math.max(0, tabs.findIndex((li) => String(li.className || '').indexOf('tab-on') >= 0));
-    const cur = nonIdou[activeIdx];
+    const cur = orderedServices[activeIdx];
     // 表示中タブが未入力なら、入力して停止（人が「登録する」で保存）
     if (cur && (cur.supportDetails || []).length && !supportTabFilled(S, cur)) {
       await fillShogaiSupportTab(S, cur, activeIdx, skipped);
       return { phase: 'supportFilled', tabNo: activeIdx + 1, skipped };
     }
     // 表示中タブは済み（or 明細なし）→ 次の明細ありタブへ切替
-    for (let k = activeIdx + 1; k < Math.min(tabs.length, nonIdou.length); k++) {
-      if (!(nonIdou[k].supportDetails || []).length) continue;
+    for (let k = activeIdx + 1; k < Math.min(tabs.length, orderedServices.length); k++) {
+      if (!(orderedServices[k].supportDetails || []).length) continue;
       const a = tabs[k].querySelector('a') || tabs[k];
       return { phase: 'supportSwitch', tabEl: a, next: k + 1, skipped };
     }
-  } else if (services.some((svc) => !isIdouSvc(svc) && (svc.supportDetails || []).length)) {
+  } else if (services.some((svc) => (svc.supportDetails || []).length)) {
     // タブが無い＝サービス未登録の画面等。旧フラット方式は誤入力のもとなので入力しない
     skipped.push('援助内容: サービスタブが見つからないためスキップしました（サービス登録後に再実行してください）');
   }
 
   // 説明日（作成状態・最終登録は人間）
   await setWarekiDate(S.deliveryDate, basic.explainDate);
-  // 保険外（移動支援）は自動登録の対象外＝計画書の「登録する」後に人が手動登録する
-  const svcLabel = (svc) => `${svc.serviceType || svc.insuranceType || 'サービス'}（${svc.startTime || '?'}〜${svc.endTime || '?'} ${(svc.provisionDays || []).join('・')}）`;
-  const manualIdou = idouSvcs.map(svcLabel);
-  return { phase: 'done', count: services.length, skipped, manualIdou };
+  return { phase: 'done', count: services.length, skipped };
 }
 
 // 契約支給量（form:loop:N:contractSupplyQuantity）を入力する。数値（時間/月）のみ書き込む。
@@ -1034,7 +1042,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           if (result.phase === 'service') {
             // 保険内サービスの保存クリックでページ全体が再読み込みされ応答チャネルが切れるため、
             // 先に応答を返してから実際の「登録する」ボタンをクリックする
-            sendResponse({ ok: true, phase: 'service', svcNo: result.svcNo, remaining: result.remaining, skipped: result.skipped || [] });
+            sendResponse({ ok: true, phase: 'service', svcNo: result.svcNo, remaining: result.remaining, kind: result.kind || '', skipped: result.skipped || [] });
             await humanSleep();
             await clickShogaiRegist(result.registEl);
             return;
