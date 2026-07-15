@@ -885,10 +885,21 @@ async function runShogai(profile, payload) {
     return { phase: 'service', registEl: regist, svcNo, remaining: pending.length - 1, skipped, isIdou };
   }
 
-  // ④ 全サービス保存済み → 契約支給量・援助内容・説明日を入れて完了
-  for (let i = 0; i < services.length; i++) {
-    const svc = services[i];
-    if (svc.contractSupplyQuantity) {
+  // ④ 全サービス保存済み → 契約支給量 → 援助内容（サービスNタブごと）→ 説明日
+  // 【v2.10.0】障害の援助内容は「サービスN」タブ式（実HTML: div#idTabService、タブ切替は
+  // oamSubmitFormのフル送信＝画面遷移）。form:service:R は「表示中タブのR行目」を指す。
+  // 旧実装は全サービスの明細をサービス1のタブに詰め込んでいた（7/15実機で発覚）。
+  // 1回のRUN_ALLで「表示中タブ1枚だけ」入力し、次のタブへは応答後にクリックして
+  // backgroundが再読み込みをまたいで継続する（サービス保存と同じ方式）。
+  const tabs = [...document.querySelectorAll('#idTabService li')];
+  const activeIdx = tabs.findIndex((li) => String(li.className || '').indexOf('tab-on') >= 0);
+  const nonIdou = services.filter((svc) => !isIdouSvc(svc)); // タブk = k番目の保険内サービス（登録順）
+
+  // 契約支給量は最初のタブ表示時に1回だけ入力（各ページに常に表示されている）
+  if (activeIdx <= 0) {
+    for (let i = 0; i < services.length; i++) {
+      const svc = services[i];
+      if (!svc.contractSupplyQuantity) continue;
       // 契約支給量は数値（時間/月）のみ。AIが区分名（身体介護等）を出した場合は書き込まない
       const q = z2h(String(svc.contractSupplyQuantity)).trim();
       if (/^[0-9]+(\.[0-9]+)?$/.test(q)) {
@@ -898,56 +909,95 @@ async function runShogai(profile, payload) {
       }
     }
   }
-  // 援助内容（フラット form:service:N）に全サービスの明細を順に入力。
-  // 区分・項目がマスタ外の値でも止めない：項目は「その他」で代用し、最後に一覧で知らせる
-  // 【v2.9.9】「行を追加する」はページ上部の【契約支給量情報】にも同名リンクがあるため、
-  // 【援助内容】見出しより後ろにあるものだけをクリックする（v2.9.8で契約支給量の行を
-  // 誤って増やす事故が起きた）。行を追加できない場合はクラッシュせずスキップして知らせる。
-  const findSupportAddRow = () => {
-    const adds = [...document.querySelectorAll(S.addSupportRow)];
-    if (!adds.length) return null;
-    const header = [...document.querySelectorAll('th, td, div, p, span, strong, b, h1, h2, h3')]
-      .find((el) => { const t = (el.textContent || '').trim(); return t.length <= 12 && /援助内容|援護内容/.test(t); });
-    if (!header) return null; // 見出しが特定できないときは誤クリックを避けて追加しない
-    return adds.find((el) => header.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) || null;
-  };
-  const details = [];
-  services.forEach((svc) => (svc.supportDetails || []).forEach((d) => details.push(d)));
-  for (let r = 0; r < details.length; r++) {
-    const d = details[r];
-    if (!document.querySelector(S.support.time(r))) {
-      const addRow = findSupportAddRow();
-      if (addRow) { await humanSleep(); safeClick(addRow); await sleep(1000); }
-      if (!document.querySelector(S.support.time(r))) {
-        skipped.push(`援助内容${r + 1}行目以降（${details.length - r}件分）: 入力行を追加できないためスキップしました。手動で「行を追加する」を押して入力してください`);
-        break;
+
+  // 表示中タブの援助内容を入力
+  if (tabs.length && activeIdx >= 0 && activeIdx < nonIdou.length) {
+    await fillShogaiSupportTab(S, nonIdou[activeIdx], activeIdx, skipped);
+    // 次に入力が必要なタブがあれば、応答後にタブをクリックして続きはbackgroundに任せる
+    for (let k = activeIdx + 1; k < Math.min(tabs.length, nonIdou.length); k++) {
+      if ((nonIdou[k].supportDetails || []).length) {
+        const a = tabs[k].querySelector('a') || tabs[k];
+        return { phase: 'supportTab', tabEl: a, next: k + 1, skipped };
       }
     }
-    const rowTag = `援助内容${r + 1}行目`;
-    if (d.category) {
-      try { await selectOption(S.support.division(r), d.category, { visible: false, optionTimeout: 2000 }); }
-      catch (_) { skipped.push(`${rowTag}: 区分「${d.category}」が選択肢に無いためスキップ`); }
+  } else if (!tabs.length) {
+    // タブが無い＝サービス未登録の画面等。旧フラット方式は誤入力のもとなので入力しない
+    if (services.some((svc) => (svc.supportDetails || []).length)) {
+      skipped.push('援助内容: サービスタブが見つからないためスキップしました（サービス登録後に再実行してください）');
     }
-    if (d.item) {
-      try { await selectOption(S.support.item(r), d.item, { visible: false, optionTimeout: 2000 }); }
-      catch (_) {
-        try {
-          await selectOption(S.support.item(r), 'その他', { visible: false, optionTimeout: 2000 });
-          skipped.push(`${rowTag}: 項目「${d.item}」が選択肢に無いため「その他」で代用`);
-        } catch (_) { skipped.push(`${rowTag}: 項目「${d.item}」が選択できずスキップ`); }
-      }
-    }
-    if (d.requiredTime) await fillInput(S.support.time(r), d.requiredTime, { visible: false });
-    if (d.notes) await fillInput(S.support.notes(r), d.notes, { visible: false });
-    if (d.content) await fillInput(S.support.hope(r), d.content, { visible: false });
-    await humanSleep();
   }
+
   // 説明日（作成状態・最終登録は人間）
   await setWarekiDate(S.deliveryDate, basic.explainDate);
   // 保険外（移動支援）は自動登録の対象外＝計画書の「登録する」後に人が手動登録する
   const svcLabel = (svc) => `${svc.serviceType || svc.insuranceType || 'サービス'}（${svc.startTime || '?'}〜${svc.endTime || '?'} ${(svc.provisionDays || []).join('・')}）`;
   const manualIdou = idouSvcs.map(svcLabel);
   return { phase: 'done', count: services.length, skipped, manualIdou };
+}
+
+// テキスト/テキストエリアに値を入れて blur を発火し、カイポケのonblurのajax（ajaxSingle）で
+// その1項目をサーバー側に確定させる。障害の援助内容は区分selectの変更で行テーブル全体が
+// ajax再描画されるため、blur未発火のままだと後の再描画で入力が消える（v2.9.9以前の
+// 「先頭行が空白になる」の原因）。値が同じ場合は触らない（不要なajaxを起こさない）。
+async function setTextPersist(selector, value) {
+  const el = document.querySelector(selector);
+  if (!el) return false;
+  const v = (value === undefined || value === null) ? '' : String(value);
+  if (String(el.value || '') === v) return true;
+  setNativeValue(el, v);
+  el.dispatchEvent(new FocusEvent('blur'));
+  await sleep(700); // blurのajax完了を待つ
+  return true;
+}
+
+// 表示中の「サービスN」タブに、そのサービスの援助内容（supportDetails）を入力する。
+// 順序が重要: 区分select（onchange→行テーブル全体を再描画）→待つ→項目select（ajax）→待つ→
+// テキスト3欄（blurで1項目ずつ確定）。要素参照は毎回セレクタで取り直す（再描画で差し替わるため）。
+async function fillShogaiSupportTab(S, svc, tabIdx, skipped) {
+  const details = svc.supportDetails || [];
+  const tag = `援助内容(サービス${tabIdx + 1})`;
+  // 既にこのタブへ入力済みなら触らない（人の修正を上書きしない）
+  const already = details.length && details.every((d, r) => {
+    const t = document.querySelector(S.support.time(r));
+    const h = document.querySelector(S.support.hope(r));
+    const timeOk = !d.requiredTime || (t && String(t.value).trim() === String(d.requiredTime).trim());
+    const hopeOk = !d.content || (h && String(h.value).trim() === String(d.content).trim());
+    return timeOk && hopeOk;
+  });
+  if (already) return;
+  for (let r = 0; r < details.length; r++) {
+    const d = details[r];
+    if (!document.querySelector(S.support.time(r))) {
+      skipped.push(`${tag}${r + 1}行目以降（${details.length - r}件分）: 入力行が足りないためスキップ（手動で入力してください）`);
+      break;
+    }
+    const rowTag = `${tag}${r + 1}行目`;
+    if (d.category) {
+      try { await selectOption(S.support.division(r), d.category, { visible: false, optionTimeout: 2000 }); await sleep(1200); }
+      catch (_) { skipped.push(`${rowTag}: 区分「${d.category}」が選択肢に無いためスキップ`); }
+    }
+    if (d.item) {
+      try { await selectOption(S.support.item(r), d.item, { visible: false, optionTimeout: 2500 }); await sleep(800); }
+      catch (_) {
+        try {
+          await selectOption(S.support.item(r), 'その他', { visible: false, optionTimeout: 2000 }); await sleep(800);
+          skipped.push(`${rowTag}: 項目「${d.item}」が選択肢に無いため「その他」で代用`);
+        } catch (_) { skipped.push(`${rowTag}: 項目「${d.item}」が選択できずスキップ`); }
+      }
+    }
+    await setTextPersist(S.support.time(r), d.requiredTime);
+    await setTextPersist(S.support.notes(r), d.notes);
+    await setTextPersist(S.support.hope(r), d.content);
+  }
+  // 明細より後ろの行に残っている値（旧バージョンが詰め込んだ他サービスの明細など）を消す
+  for (let r = details.length; ; r++) {
+    if (!document.querySelector(S.support.time(r))) break;
+    for (const k of ['division', 'item']) {
+      const el = document.querySelector(S.support[k](r));
+      if (el && el.value) { setNativeValue(el, ''); await sleep(1000); }
+    }
+    for (const k of ['time', 'notes', 'hope']) await setTextPersist(S.support[k](r), '');
+  }
 }
 
 // =============================================================
@@ -982,6 +1032,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             // 保険外（移動支援）はクリック経由のサイレント失敗対策としてform直接送信、保険内は実績のあるクリック方式
             if (result.isIdou) await submitShogaiRegistForm(result.registEl);
             else await clickShogaiRegist(result.registEl);
+            return;
+          }
+          if (result.phase === 'supportTab') {
+            // 援助内容タブの切替はフォーム全体の再送信＝画面遷移になり応答チャネルが切れるため、
+            // 先に応答を返してからタブをクリックする（backgroundが再読み込みを待って続行する）
+            sendResponse({ ok: true, phase: 'supportTab', next: result.next, skipped: result.skipped || [] });
+            await humanSleep(); safeClick(result.tabEl);
             return;
           }
           sendResponse({ ok: true, phase: result.phase, count: result.count || 0, skipped: result.skipped || [], errors: result.errors || [] });

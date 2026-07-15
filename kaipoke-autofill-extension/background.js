@@ -325,9 +325,10 @@ async function startAutofill(payload, mainTabId) {
     // RUN_ALL（1フェーズずつ進む）を繰り返し呼び、再読み込みをまたいで自動継続する。
     const total = (payload.services || []).length;
     const allSkipped = [];
-    let guard = total + 4; // 想定外ループの安全弁（基本情報＋サービス件数＋仕上げ＋余裕）
+    let guard = total * 2 + 6; // 想定外ループの安全弁（基本情報＋サービス件数＋援助内容タブ数＋仕上げ＋余裕）
     let message = '';
     let prevRemaining = Infinity; // 「進んでいない」検知用（保存が反映されず同じサービスを繰り返すのを防ぐ）
+    let prevSupportNext = 0; // 援助内容タブが前に進んでいるかの検知用
     reportProgress(5, '計画書を入力中…');
     for (;;) {
       if (--guard < 0) throw new Error('障害計画書の処理が想定回数を超えました。ページを再読み込みして、同じJSONのままもう一度実行してください（入力済みは自動スキップされます）。');
@@ -362,10 +363,21 @@ async function startAutofill(payload, mainTabId) {
         await waitForContentReady(mainTabId); // 保存によるページ再読み込み→content.js再注入を待つ
         continue;
       }
+      if (r.phase === 'supportTab') {
+        // 援助内容のタブ切替（フォーム全体の再送信＝画面遷移）。進んでいなければ停止する
+        if (typeof r.next === 'number' && r.next <= prevSupportNext) {
+          throw new Error(`援助内容のサービス${r.next}タブへの切替が進みません。ページを再読み込みして、同じJSONのままもう一度実行してください（入力済みのタブは自動スキップされます）。`);
+        }
+        prevSupportNext = r.next;
+        reportProgress(80 + (r.next / Math.max(1, total)) * 10, `援助内容: サービス${r.next}のタブに切り替えています…`);
+        await new Promise((res) => setTimeout(res, 2000));
+        await waitForContentReady(mainTabId); // タブ切替による画面遷移→content.js再注入を待つ
+        continue;
+      }
       // done: 契約支給量・援助内容・説明日まで完了（保険外は自動登録の対象外）
       message = `保険内サービスの下書き入力が完了しました。援助内容・説明日まで入力済みです。目視確認のうえ、作成状態を「作成済」にしてご自身で「登録する」を押してください。`;
       if (r.manualIdou && r.manualIdou.length) {
-        message += `\n\n📝【保険外（移動支援）${r.manualIdou.length}件は手動登録です】保険内が計画書として登録済みになる前は、カイポケが保険外の追加を受け付けないため、自動登録の対象外にしています。\n① まずご自身で計画書の「登録する」を押す\n② 編集画面に戻り、【保険外】タブの「新規追加する」から次の内容を手動で登録してください：\n・` + r.manualIdou.join('\n・');
+        message += `\n\n📝【保険外（移動支援）${r.manualIdou.length}件は手動登録です】保険内が計画書として登録済みになる前は、カイポケが保険外の追加を受け付けないため、自動登録の対象外にしています。\n① まずご自身で計画書の「登録する」を押す\n② 編集画面に戻り、【保険外】タブの「新規追加する」から次の内容を手動で登録してください（登録後に増えるサービスタブの援助内容も手動入力）：\n・` + r.manualIdou.join('\n・');
       }
       break;
     }
