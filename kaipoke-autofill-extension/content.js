@@ -1,4 +1,15 @@
-// content.js（v4：計画書3種すべて実DOM反映）
+// content.js（v7：サービス区分・算定時間の3項目に対応（ラベル文言でselectを特定）／v6：goService方式＋保存前応答）
+// v7の追加点：実画面のサービス設定ポップアップには、サービス種類選択後にajaxで
+//   「サービス区分」「身体介護の算定時間」「生活援助の算定時間」（いずれも必須）が出現する。
+//   IDが不定のためラベル文言（th）から同じ行のselectを特定して選択する。
+//   この3つを選ぶとサービス内容ラジオと単位数はカイポケが自動選定するため、JSON側のserviceContent/unitsは省略可。
+//   JSONの新フィールド: serviceCategory（例 身体・生活）/ physicalCareTime（例 20分以上~30分未満）/ lifeAssistTime（例 20分以上）
+// v6の修正点：
+//   1. handleOpenServiceModal: 隠しフィールド form:insuranceDiv に 01(保険内)/02(保険外) をセットしてから
+//      form:serviceAct を押す（ページ本来の goService('', div) と同じ手順）。
+//      → v5 は直接押していたため保険区分が空になり「新規追加（保険外）」で開いていた。
+//   2. setRadio: 既にチェック済みならクリックしない（保険区分radioのonchange=ajax全再描画を回避）。
+//   3. FILL_SERVICE: 「保存する」クリックでウィンドウが閉じて応答チャネルが切れるため、応答を返してから保存する。
 // カイポケ計画書の自動入力コアロジック。計画書は3種類。URLで判定して振る舞う。
 //
 //   ・要介護  訪問介護計画書        : メイン MEM093151(新規)/MEM093103(編集)  + サービス設定は別ウィンドウ MEM093104
@@ -21,7 +32,8 @@ const PROFILES = {
   // ---------- 要介護 訪問介護計画書 ----------
   youkaigo: {
     label: '要介護 訪問介護計画書',
-    match: ['MEM093151', 'MEM093103'],
+    // 093151=新規 / 093103=一覧からの編集 / 093102=登録直後の編集（実機で確認）
+    match: ['MEM093151', 'MEM093103', 'MEM093102'],
     mode: 'window',
     servicePopupMatch: 'MEM093104',
     isYoshien: false,
@@ -31,7 +43,8 @@ const PROFILES = {
   // ---------- 要支援 介護予防訪問介護計画書 ----------
   youshien: {
     label: '要支援 介護予防訪問介護計画書',
-    match: ['MEM093155'],
+    // 093155=新規 / 093114=登録直後の編集 / 093115=サービス保存後・一覧からの編集（いずれも実機で確認 7/14）
+    match: ['MEM093155', 'MEM093114', 'MEM093115'],
     mode: 'window',
     servicePopupMatch: 'MEM093104',
     isYoshien: true,
@@ -41,7 +54,8 @@ const PROFILES = {
   // ---------- 障害 居宅介護等計画書 ----------
   shogai: {
     label: '障害 居宅介護等計画書',
-    match: ['MEM083101', 'MEM083103'],
+    // 083101=新規 / 083103=一覧から編集 / 083102=登録直後の編集（実機で確認 7/15）
+    match: ['MEM083101', 'MEM083103', 'MEM083102'],
     mode: 'inline',
     sel: mainSelShogai(),
     popupSel: popupSelShogai(),
@@ -206,22 +220,111 @@ async function fillInput(selector, value, options = {}) {
   await humanSleep(); setNativeValue(el, String(value)); await humanSleep();
 }
 
-async function selectOption(selector, value, options = {}) {
-  if (value === undefined || value === null || value === '') return;
-  const el = await waitForElement(selector, options);
-  await humanSleep();
+// 全角数字→半角（JSONを手修正した際の全角入力「令和８年」等への対策）
+const z2h = (s) => String(s).replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+
+// 全角/半角スペース等の空白差と、全角数字・括弧・スラッシュ、チルダ表記ゆれ（~ ～ 〜）、期間表記ゆれ（AからBまで⇔A~B）を無視して照合する
+// （例「向日葵　介護センター」vs「向日葵 介護センター」、「訪問型サービス（独自/低率）」vs「訪問型サービス(独自／低率)」）
+const norm = (s) => z2h(String(s)).replace(/[\s　]+/g, '').replace(/[~～〜]/g, '~').replace(/から/g, '~').replace(/まで/g, '')
+  .replace(/（/g, '(').replace(/）/g, ')').replace(/／/g, '/')
+  .replace(/[①-⑩]/g, (c) => String(c.charCodeAt(0) - 0x245F)) // 丸数字→数字（例: 障害支援区分⑥⇔区分6）
+  .replace(/低率/g, '定率'); // 予防サービス種類の正しい表記は「定率」（7/15実機確認）。旧JSONの「低率」を読み替える
+
+// <select>から表記ゆれを許容してoptionを選ぶ（selectOption/selectOptionByLabel共通）
+function pickOption(el, value, what) {
   const target = String(value).trim();
+  const nt = norm(target);
   let matched = null;
   for (const opt of Array.from(el.options || [])) {
-    if (opt.value === target || opt.textContent.trim() === target) { matched = opt; break; }
+    if (opt.value === target || norm(opt.textContent) === nt) { matched = opt; break; }
   }
-  if (!matched) for (const opt of Array.from(el.options || [])) { if (opt.textContent.trim().includes(target)) { matched = opt; break; } }
-  if (!matched) throw new Error(`選択肢が見つかりません: "${selector}" に「${target}」なし（カイポケ登録値と不一致の可能性）。`);
-  setNativeValue(el, matched.value); await humanSleep();
+  if (!matched && nt) for (const opt of Array.from(el.options || [])) { if (norm(opt.textContent).includes(nt)) { matched = opt; break; } }
+  if (!matched) {
+    // 原因調査のため、その時点で実際にあった選択肢を（先頭15件まで）エラー文に含める
+    const opts = Array.from(el.options || []).map((o) => (o.textContent || '').trim()).filter(Boolean).slice(0, 15).join(' ／ ');
+    throw new Error(`選択肢が見つかりません: ${what} に「${target}」なし（カイポケ登録値と不一致の可能性）。その時点の選択肢: ${opts || '（空＝読み込み前の可能性）'}`);
+  }
+  if (el.value === matched.value) return; // 既に選択済みなら触らない（onchangeの不要なajax再描画を避ける）
+  setNativeValue(el, matched.value);
+}
+
+async function selectOption(selector, value, options = {}) {
+  if (value === undefined || value === null || value === '') return;
+  await waitForElement(selector, options);
+  await humanSleep();
+  // ajax再描画で選択肢が後から充填される/要素ごと差し替えられるselectがあるため、
+  // 一致する選択肢が現れるまで一定時間リトライする（毎回要素を取り直す）
+  const deadline = Date.now() + (options.optionTimeout || 8000);
+  for (;;) {
+    try {
+      const el = document.querySelector(selector);
+      if (!el) throw new Error(`要素が見つかりません: "${selector}"`);
+      pickOption(el, value, `"${selector}"`);
+      break;
+    } catch (e) {
+      if (Date.now() >= deadline) throw e;
+      await sleep(400);
+    }
+  }
+  await humanSleep();
+}
+
+// ラベル文言（th/tdセルのテキスト）から同じ行の<select>を探す。
+// サービス区分・算定時間などIDが不定／ajaxで後から出現する項目向け（ポーリングつき）。
+// 注意: カイポケは同じ文言のラベルが非表示ブロックにも存在することがあるため、
+//   一致する全ラベルセルを走査し「表示中かつ有効なselectを持つ行」だけを採用する。
+//   ラベルセルは文言が最も短い（＝余計な内容を含まない）ものから優先する。
+async function waitForLabeledSelect(labelText, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  const nt = norm(labelText);
+  const isShown = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  while (Date.now() < deadline) {
+    const cells = [...document.querySelectorAll('th, td')]
+      .filter((t) => !t.querySelector('select') && norm(t.textContent).includes(nt))
+      .sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
+    for (const cell of cells) {
+      const row = cell.closest('tr');
+      const sel = row && row.querySelector('select');
+      if (sel && !sel.disabled && isShown(sel)) return sel;
+    }
+    await sleep(200);
+  }
+  // 欄が無いのは画面構成上の正常ケースもあるため、警告ではなく情報ログに留める
+  console.info(`waitForLabeledSelect: 「${labelText}」の欄なし（ラベル存在=${
+    [...document.querySelectorAll('th, td')].some((t) => norm(t.textContent).includes(nt))
+  }）`);
+  return null;
+}
+
+// ラベル文言で特定した<select>に選択を入れる。欄が無ければ警告してスキップ
+// （要支援など画面によって存在しない項目があるため。必須欄の入れ忘れは保存時バリデーションで停止する）。
+async function selectOptionByLabel(labelText, value) {
+  if (value === undefined || value === null || value === '') return true;
+  const el = await waitForLabeledSelect(labelText);
+  if (!el) { console.warn(`「${labelText}」の欄が見つからずスキップ:`, value); return false; }
+  await humanSleep();
+  pickOption(el, value, `「${labelText}」`);
+  await humanSleep();
+  return true;
+}
+
+// 選択肢と不一致でも全体を止めたくない項目用（警告してスキップ。人が目視で補正する前提）。
+// skipped配列を渡すと、スキップした項目名を積んで完了メッセージで利用者に知らせられる。
+async function selectOptionByLabelSoft(labelText, value, skipped) {
+  try {
+    const done = await selectOptionByLabel(labelText, value);
+    if (!done && skipped) skipped.push(`${labelText}（欄が見つからない）`);
+  } catch (e) {
+    console.warn(`「${labelText}」は選択できずスキップ（手動確認してください）:`, e && e.message);
+    if (skipped) skipped.push(`${labelText}（選択肢と不一致）`);
+  }
 }
 
 async function setRadio(selector, options = {}) {
   const el = await waitForElement(selector, options);
+  // 既に選択済みなら触らない（保険区分radioはonchangeにajax全画面再描画が仕込まれており、
+  // 不要なクリックは再描画→通信切断の原因になる）
+  if (el.checked) { await humanSleep(); return; }
   await humanSleep();
   el.checked = true;
   el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -235,18 +338,49 @@ async function setCheckbox(selector, checked, options = {}) {
   await humanSleep();
 }
 
-async function setWarekiDate(dateSelectors, warekiStr, options = {}) {
-  if (!warekiStr || !dateSelectors) return;
-  const p = parseWareki(warekiStr);
-  if (!p) throw new Error(`和暦日付の解釈に失敗: "${warekiStr}"（例: 令和8年7月13日）`);
-  await selectOption(dateSelectors.era, p.era, options);
-  await selectOption(dateSelectors.year, p.year, options);
-  await selectOption(dateSelectors.month, p.month, options);
-  await selectOption(dateSelectors.day, p.day, options);
+// 和暦の日付select（元号/年/月/日）へ入力する。日付が原因で処理全体を止めない：
+//   ・解釈できない場合、fallbackToday=true なら実行日（今日）を入れる。それ以外はスキップ（画面の値のまま）。
+//   ・選択肢との不一致など入力自体の失敗も警告してスキップする（人が目視確認する前提）。
+async function setWarekiDate(dateSelectors, warekiStr, { fallbackToday = false } = {}) {
+  if (!dateSelectors) return;
+  let p = parseWareki(warekiStr);
+  if (!p) {
+    if (!warekiStr && !fallbackToday) return;
+    if (fallbackToday) {
+      if (warekiStr) console.warn(`日付「${warekiStr}」を解釈できないため実行日（今日）を入力します。`);
+      p = todayWareki();
+    } else {
+      console.warn(`日付「${warekiStr}」を解釈できないためスキップします（画面の値のまま）。`);
+      return;
+    }
+  }
+  try {
+    await selectOption(dateSelectors.era, p.era);
+    await selectOption(dateSelectors.year, p.year);
+    await selectOption(dateSelectors.month, p.month);
+    await selectOption(dateSelectors.day, p.day);
+  } catch (e) {
+    console.warn('日付欄の入力に失敗したためスキップします（画面の値を目視確認してください）:', e && e.message);
+  }
 }
+// 和暦・西暦のどちらの表記も受け付ける（全角数字・空白・元年は norm/z2h と同様に吸収）
+//   例: 令和8年7月13日 / 令和元年5月1日 / ２０２６年７月１４日 / 2026/7/14 / 2026-07-14
 function parseWareki(s) {
-  const m = String(s).match(/^\s*(明治|大正|昭和|平成|令和)\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日\s*$/);
-  return m ? { era: m[1], year: m[2], month: m[3], day: m[4] } : null;
+  if (!s) return null;
+  const t = z2h(String(s)).replace(/[\s　]/g, '').replace(/元年/, '1年');
+  let m = t.match(/(明治|大正|昭和|平成|令和)(\d+)年(\d+)月(\d+)日/);
+  if (m) return { era: m[1], year: String(parseInt(m[2], 10)), month: String(parseInt(m[3], 10)), day: String(parseInt(m[4], 10)) };
+  m = t.match(/(\d{4})[年\/\-](\d{1,2})[月\/\-](\d{1,2})日?/);
+  if (m) {
+    const y = parseInt(m[1], 10);
+    if (y >= 2019) return { era: '令和', year: String(y - 2018), month: String(parseInt(m[2], 10)), day: String(parseInt(m[3], 10)) };
+  }
+  return null;
+}
+// 実行日（今日）の和暦表現。作成年月日のフォールバックに使う。
+function todayWareki() {
+  const d = new Date();
+  return { era: '令和', year: String(d.getFullYear() - 2018), month: String(d.getMonth() + 1), day: String(d.getDate()) };
 }
 
 // "08:15" → "0815"（障害ポップアップの時間テキスト欄・4桁）。既に数字のみなら4桁に整える。
@@ -284,12 +418,12 @@ async function selectServiceContentRadio(boxSel, text) {
 // =============================================================
 async function handleFillBasic(profile, basicInfo = {}) {
   const S = profile.sel;
-  await setWarekiDate(S.createdDate, basicInfo.createdDate);
-  await selectOption(S.insuredProof, basicInfo.insurancePeriod);
+  // 作成年月日（必須欄）：JSONの作成日を入れる。解釈できない場合は実行日（今日）
+  await setWarekiDate(S.createdDate, basicInfo.createdDate, { fallbackToday: true });
+  // 【運用ルール 2026/07/14】被保険者証適用期間・地域包括支援センター・居宅介護支援事業所・
+  // 担当ケアマネージャーの4つの選択式項目は自動入力の対象外（人がカイポケ上で選択する）。
+  // 原案JSONの値は原案画面のプレビューに「※手入力」の参考値として表示される。
   await fillInput(S.author, basicInfo.author);
-  if (S.communityGeneralSc) await selectOption(S.communityGeneralSc, basicInfo.communityGeneralSc);
-  await selectOption(S.careOffice, basicInfo.careOffice);
-  await selectOption(S.careManager, basicInfo.careManager);
   await fillInput(S.issues, basicInfo.issues);
   await fillInput(S.longTerm, basicInfo.longTermGoal);
   await fillInput(S.shortTerm, basicInfo.shortTermGoal);
@@ -297,21 +431,120 @@ async function handleFillBasic(profile, basicInfo = {}) {
   await fillInput(S.notes, basicInfo.notes);
 }
 
-async function handleOpenServiceModal(profile) {
-  const btn = await waitForElement(profile.sel.serviceActButton);
-  await humanSleep(); safeClick(btn); await humanSleep(); // 別ウィンドウが開く
+async function handleOpenServiceModal(profile, insuranceType) {
+  // ページ本来の goService('', div) と同じ手順で開く：
+  // 隠しフィールド form:insuranceDiv に保険区分（01=保険内/02=保険外）をセットしてから
+  // ajaxボタン form:serviceAct をクリックする。
+  // ※直接 form:serviceAct を押すと保険区分が空のまま→「新規追加（保険外）」で開いてしまう。
+  const div = insuranceType === '保険外' ? '02' : '01';
+  const hvnId = document.querySelector(ID('form:hvnPlanDetailId'));
+  const insDiv = document.querySelector(ID('form:insuranceDiv'));
+  if (hvnId) hvnId.value = '';
+  if (insDiv) insDiv.value = div;
+  const btn = await waitForAddServiceButton(profile.sel.serviceActButton);
+  await humanSleep(); safeClick(btn); await humanSleep(); // ajax送信完了時に openPopup() で別ウィンドウが開く
+}
+
+// 「新規追加する」ボタンを頑健に探す（id → alt/value/テキストに「新規追加」を含む要素の順）
+async function waitForAddServiceButton(idSelector, timeout = 10000) {
+  const deadline = Date.now() + timeout;
+  const find = () => {
+    if (idSelector) { const el = document.querySelector(idSelector); if (el) return el; }
+    return [...document.querySelectorAll('input,img,button,a')].find((e) => {
+      const t = (e.getAttribute('alt') || e.value || e.textContent || '').replace(/[\s　]/g, '');
+      return t.includes('新規追加');
+    }) || null;
+  };
+  while (Date.now() < deadline) {
+    const el = find();
+    if (el) return el;
+    await sleep(200);
+  }
+  throw new Error('「新規追加する」ボタンが見つかりませんでした。新規作成画面では、先に基本情報を保存（作成中）してからサービス追加が必要な可能性があります。');
+}
+
+// 週間計画表から入力済みサービスの行テキストを取得（再実行時のスキップ判定用）。
+// 「サービス 1」等のリンクを含む行の全テキスト（時間帯・提供日を含む）を返す。
+function getExistingServices() {
+  const links = [...document.querySelectorAll('a')].filter((a) => /^サービス\s*\d+$/.test((a.textContent || '').trim()));
+  return links.map((a) => {
+    const tr = a.closest('tr');
+    return { text: tr ? (tr.textContent || '').replace(/\s+/g, ' ').trim() : '' };
+  });
+}
+
+// サービス追加ボタンが今この画面に在るか（新規画面＝無い＝保存が先）。短時間チェック・非throw。
+async function hasAddServiceButton() {
+  const idSel = (PROFILE.sel && (PROFILE.sel.serviceActButton || PROFILE.sel.addServiceButton)) || null;
+  try { await waitForAddServiceButton(idSel, 3000); return true; } catch (_) { return false; }
+}
+
+// 予防（予訪問介護）のサービス種類を決める（運用ルール 2026/07/14、表記は7/15実機確認）：
+//   訪問型サービス（独自）      … 身体的介助がある、または「一緒に行う」等の見守り的支援がある場合
+//   訪問型サービス（独自/定率） … 掃除・調理・洗濯など身体介助が不要な場合（＝生活支援型サービス）
+//   ※実画面には「訪問型サービス（独自/定額）」もあるが現運用では使わない
+// AIが正しい表記（訪問型…）で出力していればそれを使い、旧表記（訪問介護等）なら援助内容から自動判定する。
+function yoshienServiceKind(service) {
+  const t = String(service.serviceType || '');
+  if (t.indexOf('訪問型') >= 0) return t;
+  const det = Array.isArray(service.supportDetails) ? service.supportDetails : [];
+  const hasBody = det.some((d) =>
+    String(d.category || '').indexOf('身体') >= 0 ||
+    /一緒/.test(String(d.item || '') + String(d.content || '')));
+  return hasBody ? '訪問型サービス（独自）' : '訪問型サービス（独自/定率）';
 }
 
 // ポップアップ（MEM093104）側のフォーム入力
-async function handleFillServiceKaigo(profile, service = {}) {
+// ※このポップアップは要介護/要支援で共通URLのため、種別は background から isYoshien で受け取る
+//   （popup側の detectProfile では判別できない）
+async function handleFillServiceKaigo(profile, service = {}, basicInfo = {}, isYoshien = false) {
   const P = profile.popupSel;
+  const skipped = []; // 自動選択できなかった項目（完了メッセージで利用者に知らせる）
   await waitForElement(P.root); await humanSleep();
   await setRadio(service.insuranceType === '保険外' ? P.insuranceOutside : P.insuranceInside);
-  await selectOption(P.serviceKind, service.serviceType);   // ajaxでサービス内容が読み込まれる
-  await sleep(1000);
-  await selectOption(P.servicePlant, service.serviceOffice);
-  await selectServiceContentRadio(P.serviceContentBox, service.serviceContent);
-  await fillInput(P.unit, service.units);
+  if (isYoshien) {
+    // ---- 予防（予訪問介護）: サービス種類→（ajaxで保険者・サービス区分等が出現） ----
+    // サービス種類の選択肢はajaxで遅れて入ることがあり、タイミングによって失敗していたため長めに待つ
+    await selectOption(P.serviceKind, yoshienServiceKind(service), { optionTimeout: 20000 });
+    await sleep(1200);
+    await selectOption(P.servicePlant, service.serviceOffice, { optionTimeout: 15000 });
+    // 保険者：地域包括支援センター名の「名古屋市●●区」を選ぶ（例: 名古屋市中川区西部いきいき支援センター→名古屋市中川区）
+    const ward = String(basicInfo.communityGeneralSc || '').match(/名古屋市.+?区/);
+    if (ward) await selectOptionByLabelSoft('保険者', ward[0], skipped);
+    else { skipped.push('保険者（包括支援センター名から判定できず）'); console.warn('保険者は判定できずスキップ（手動選択してください）'); }
+    await sleep(1000); // 保険者選択のajax再描画を待ってからサービス区分へ
+    // サービス区分：週間計画（毎週＋提供曜日）で運用しているため「1週当たり」を選ぶ。
+    // ※選んだサービス種類によってはこの欄自体が表示されない（例: 独自/定率。7/15実機確認）。
+    //   欄が無いのは正常なのでスキップ扱いにしない。真の入れ忘れは保存時バリデーションで停止する。
+    const kubunSel = await waitForLabeledSelect('サービス区分', 8000);
+    if (kubunSel) {
+      await humanSleep();
+      try { pickOption(kubunSel, '1週当たりの標準的な回数を定める場合', '「サービス区分」'); }
+      catch (e) { skipped.push('サービス区分（選択肢と不一致）'); console.warn(e && e.message); }
+      await humanSleep();
+    } else {
+      console.info('サービス区分: このサービス種類では欄が表示されないためスキップ（正常）');
+    }
+    await sleep(1000);
+    // 日割り・サ責配置減算・事業所と同一の建物の利用者減算・単位数パターン・単位数・サービス内容は
+    // 触らない（カイポケの自動算定または人の判断項目。運用ルール 2026/07/14）
+  } else {
+    // ---- 要介護: サービス種類→（ajaxで区分・算定時間・サービス内容欄が読み込まれる） ----
+    await selectOption(P.serviceKind, service.serviceType, { optionTimeout: 20000 });
+    await sleep(1200);
+    await selectOption(P.servicePlant, service.serviceOffice, { optionTimeout: 15000 });
+    // サービス区分・算定時間（実画面の必須3項目。選択するとサービス内容ラジオと単位数がカイポケ側で自動更新される）
+    await selectOptionByLabel('サービス区分', service.serviceCategory);
+    await sleep(1000);
+    await selectOptionByLabel('身体介護の算定時間', service.physicalCareTime);
+    await sleep(1000);
+    await selectOptionByLabel('生活援助の算定時間', service.lifeAssistTime);
+    await sleep(1000);
+    // サービス内容ラジオは上記3項目からカイポケが自動選定するため、JSONで明示指定された場合のみ上書き選択
+    await selectServiceContentRadio(P.serviceContentBox, service.serviceContent);
+    // 単位数もサービス内容から自動算定される。JSONで明示指定された場合のみ上書き
+    await fillInput(P.unit, service.units);
+  }
   const st = splitTime3(service.startTime), et = splitTime3(service.endTime);
   if (st) { await selectOption(P.startHour, st.hour); await selectOption(P.startMin1, st.min1); await selectOption(P.startMin2, st.min2); }
   if (et) { await selectOption(P.endHour, et.hour); await selectOption(P.endMin1, et.min1); await selectOption(P.endMin2, et.min2); }
@@ -326,22 +559,66 @@ async function handleFillServiceKaigo(profile, service = {}) {
     for (const d of (service.provisionDays || [])) await setCheckbox(P.checkedDay(d), true);
   }
   const regist = await waitForElement(P.regist);
-  await humanSleep(); safeClick(regist); await humanSleep(); // 保存→成功時ウィンドウは自動で閉じ、親画面がrefreshされる
+  await humanSleep();
+  return { regist, skipped }; // クリックは呼び出し側で行う（保存でウィンドウが閉じて応答が返せなくなるため）
+}
+
+// 援助内容の「サービスN」タブ（whichTrnHvnCarePlanDetail送信）を探す。
+// 週間計画表の「サービス N」リンク（goService）と区別するため onclick の中身で判定する。
+function findSupportTab(number) {
+  const label = 'サービス' + number;
+  return [...document.querySelectorAll('a')].find((a) =>
+    (a.textContent || '').replace(/[\s　]/g, '') === label &&
+    String(a.getAttribute('onclick') || '').indexOf('whichTrnHvnCarePlanDetail') >= 0
+  ) || null;
 }
 
 // 援助内容（listDetail:{S}）に行を入力
+// 実DOMでは、援助内容は「選択中のタブの1サービス分」だけが listDetail:{S}（通常S=0）として存在する。
+// 指定indexの要素が無い場合は、DOMに実在するSを自動検出して使う。
 async function handleFillSupport(profile, index, supportDetails = []) {
   const S = profile.sel.support;
+  let s = index;
+  if (supportDetails.length && !document.querySelector(S.division(s, 1))) {
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const el = document.querySelector('[id^="form:listDetail:"][id*=":visitServiceAlternateDivision1"]');
+      const m = el && el.id.match(/^form:listDetail:(\d+):/);
+      if (m) { s = Number(m[1]); break; }
+      await sleep(300);
+    }
+  }
+  return fillSupportRows(profile, s, supportDetails);
+}
+
+// 援助内容の行入力。区分・項目がAI出力の表記ゆれでマスタ選択肢に無くても止めない：
+// 項目は「その他」で代用し、スキップ内容の一覧を返す（backgroundが完了メッセージで知らせる）
+async function fillSupportRows(profile, index, supportDetails = []) {
+  const S = profile.sel.support;
   const max = S.maxRows || supportDetails.length;
+  const skipped = [];
   for (let i = 0; i < supportDetails.length && i < max; i++) {
     const d = supportDetails[i], r = i + 1; // 行は1始まり
-    if (d.category) await selectOption(S.division(index, r), d.category, { visible: false });
-    if (d.item) await selectOption(S.item(index, r), d.item, { visible: false });
+    const rowTag = `援助内容${r}行目`;
+    if (d.category) {
+      try { await selectOption(S.division(index, r), d.category, { visible: false, optionTimeout: 2000 }); }
+      catch (_) { skipped.push(`${rowTag}: 区分「${d.category}」が選択肢に無いためスキップ`); }
+    }
+    if (d.item) {
+      try { await selectOption(S.item(index, r), d.item, { visible: false, optionTimeout: 2000 }); }
+      catch (_) {
+        try {
+          await selectOption(S.item(index, r), 'その他', { visible: false, optionTimeout: 2000 });
+          skipped.push(`${rowTag}: 項目「${d.item}」が選択肢に無いため「その他」で代用`);
+        } catch (_) { skipped.push(`${rowTag}: 項目「${d.item}」が選択できずスキップ`); }
+      }
+    }
     if (d.content) await fillInput(S.content(index, r), d.content, { visible: false });
     if (d.requiredTime) await fillInput(S.time(index, r), d.requiredTime, { visible: false });
     if (d.notes) await fillInput(S.notes(index, r), d.notes, { visible: false });
     await humanSleep();
   }
+  return skipped;
 }
 
 async function handleFillFooter(profile, basicInfo = {}) {
@@ -351,40 +628,241 @@ async function handleFillFooter(profile, basicInfo = {}) {
 }
 
 // =============================================================
-// 障害（inline）: ページ内で全処理を完結
+// 障害（inline）: 1回の呼び出しで「1フェーズだけ」進める
+// 【重要】サービスをインラインポップアップで「保存する」とページ全体が再読み込みされ、
+// content.jsごと破棄される（=1メッセージで全処理すると通信チャネルが切れる）。
+// そのため要介護と同様に、backgroundがRUN_ALLを繰り返し呼び、こちらは毎回
+//   ・未保存サービスがあれば1件だけ入力→（応答を返した後）保存
+//   ・全部保存済みなら契約支給量・援助内容・説明日を入れて完了
+// と進める。入力済みサービスは週間計画表の行テキスト（時間帯・提供日）で自動判定する。
 // =============================================================
+
+// ラベル行のラジオボタンを表示テキストで選ぶ（移動支援の「サービス内容」など、selectではなくradioの項目用）
+async function selectLabeledRadio(labelText, optionText, onSkip) {
+  const nt = norm(labelText), no = norm(optionText);
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    const cells = [...document.querySelectorAll('th, td')]
+      .filter((t) => !t.querySelector('input,select') && norm(t.textContent).includes(nt))
+      .sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
+    for (const cell of cells) {
+      const row = cell.closest('tr');
+      const radios = row ? [...row.querySelectorAll('input[type="radio"]')] : [];
+      for (const r of radios) {
+        const lb = r.id ? row.querySelector(`label[for="${r.id}"]`) : null;
+        const txt = (lb ? lb.textContent : '') || (r.parentElement ? r.parentElement.textContent : '');
+        if (norm(txt).includes(no)) {
+          await humanSleep(); safeClick(r);
+          r.dispatchEvent(new Event('change', { bubbles: true }));
+          await humanSleep();
+          return true;
+        }
+      }
+    }
+    await sleep(300);
+  }
+  console.warn(`「${labelText}」のラジオ「${optionText}」が見つからずスキップ`);
+  if (onSkip) onSkip(`${labelText}（「${optionText}」が見つからない）`);
+  return false;
+}
+
+// 障害ポップアップの開始・終了時間を入力する。
+// 保険内（居宅介護・重度訪問介護）＝4桁テキスト欄、保険外（移動支援）＝時/分/分のselect×6（実機確認 7/15）
+async function fillShogaiTimes(P, svc, onSkip) {
+  const st = String(svc.startTime || ''), et = String(svc.endTime || '');
+  if (!st && !et) return;
+  try {
+    await waitForElement(P.startTime, { timeout: 3000 });
+    await fillInput(P.startTime, toHHMM(st));
+    await fillInput(P.endTime, toHHMM(et));
+    return;
+  } catch (_) { /* テキスト欄なし → select型（保険外） */ }
+  const s3 = splitTime3(st), e3 = splitTime3(et);
+  const nt = norm('開始・終了時間');
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const cell = [...document.querySelectorAll('th, td')]
+      .filter((t) => !t.querySelector('select') && norm(t.textContent).includes(nt))
+      .sort((a, b) => (a.textContent || '').length - (b.textContent || '').length)[0];
+    const row = cell && cell.closest('tr');
+    const sels = row ? [...row.querySelectorAll('select')] : [];
+    if (sels.length >= 6 && s3 && e3) {
+      const vals = [s3.hour, s3.min1, s3.min2, e3.hour, e3.min1, e3.min2];
+      for (let i = 0; i < 6; i++) { await humanSleep(); pickOption(sels[i], vals[i], '「開始・終了時間」'); }
+      return;
+    }
+    await sleep(300);
+  }
+  console.warn('開始・終了時間の欄が見つからずスキップ');
+  if (onSkip) onSkip('開始・終了時間（欄が見つからない）');
+}
+
+// 障害ポップアップの「登録する」を確実に押す。
+// このボタン（input type="image"）の onclick は bizFunction() 内で同期ajaxのセッション確認を行い、
+// それが失敗するとクリックが無言で不発になる（実HTML解析 7/15）。そのためリトライを行い、
+// 送信された（＝ボタンが消えた/隠れた）ことを確認する。2回失敗しても popupStuck 検知が後始末する。
+async function clickShogaiRegist(el) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try { safeClick(el); } catch (e) { console.warn('「登録する」クリック失敗:', e && e.message); }
+    console.log(`[kaipoke-autofill] サービス設定の「登録する」をクリック（試行${attempt}）`, el && el.id);
+    await sleep(2500);
+    const rc = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    if (!document.contains(el) || !rc || rc.width === 0 || rc.height === 0) return; // 送信された
+  }
+}
+
+// 保存操作済みサービスの記録（sessionStorage・タブ単位・計画書タイトル単位）。
+// 移動支援（保険外）は保存しても週間計画表（保険内タブ）に行が出ないため、
+// 表の照合だけでは「未入力」と誤判定して同じサービスを繰り返してしまう。
+// そこで「登録する」を押す直前に署名を記録し、表照合とのOR条件で入力済みと判定する。
+const shogaiSavedKey = () => 'kaipokeAutofillSaved:' + (document.title || location.pathname);
+function svcSig(svc) {
+  return [svc.serviceType, svc.startTime, svc.endTime, (svc.provisionDays || []).join('')].join('|');
+}
+function loadSavedSigs() {
+  try { return JSON.parse(sessionStorage.getItem(shogaiSavedKey()) || '[]'); } catch (_) { return []; }
+}
+function addSavedSig(sig) {
+  try {
+    const a = loadSavedSigs();
+    if (a.indexOf(sig) < 0) a.push(sig);
+    sessionStorage.setItem(shogaiSavedKey(), JSON.stringify(a));
+  } catch (_) {}
+}
+
+// 週間計画表の行テキストと照合して、このサービスが入力済みかを判定（backgroundの判定と同じロジック）
+function svcAlreadyEntered(existingRows, svc) {
+  const st = String(svc.startTime || ''), et = String(svc.endTime || '');
+  const days = svc.provisionDays || [];
+  if (!st) return false;
+  return existingRows.some((e) => {
+    const t = String(e.text || '');
+    if (t.indexOf(st) < 0) return false;
+    if (et && t.indexOf(et) < 0) return false;
+    return days.every((d) => t.indexOf(d) >= 0);
+  });
+}
+
 async function runShogai(profile, payload) {
   const S = profile.sel, P = profile.popupSel;
   const basic = payload.basicInfo || {}, services = Array.isArray(payload.services) ? payload.services : [];
+  const skipped = []; // 自動選択できなかった項目（完了メッセージで利用者に知らせる）
 
-  // ① 基本情報＋援助目標（区分・相談支援事業所は障害では無いのでスルー）
-  await setWarekiDate(S.createdDate, basic.createdDate);
-  await fillInput(S.author, basic.author);
-  await fillInput(S.hopePerson, basic.personFamilyHope || basic.hopePerson);
-  await fillInput(S.assistanceGoal, basic.assistanceGoal || basic.longTermGoal);
-
-  // ② サービスごとにインラインポップアップで追加
-  for (let i = 0; i < services.length; i++) {
-    const svc = services[i];
-    const addBtn = await waitForElement(S.addServiceButton);
-    await humanSleep(); safeClick(addBtn); await humanSleep();
-    await waitForElement(P.root); await humanSleep();
-    await setRadio(svc.insuranceType === '保険外' ? P.insuranceOutside : P.insuranceInside);
-    await selectOption(P.serviceKind, svc.serviceType);
-    await selectOption(P.servicePlant, svc.serviceOffice);
-    // 障害の時間欄はテキスト・4桁（入力例 0900〜1400）。"08:15"→"0815" に正規化して入力。
-    await fillInput(P.startTime, toHHMM(svc.startTime));
-    await fillInput(P.endTime, toHHMM(svc.endTime));
-    for (const d of (svc.provisionDays || [])) await setCheckbox(P.checkedDay(d), true);
-    const regist = await waitForElement(P.regist);
-    await humanSleep(); safeClick(regist); await sleep(1200); await humanSleep();
-    // 契約支給量（障害のみ）
-    if (svc.contractSupplyQuantity) {
-      try { await fillInput(S.supplyQty(i), svc.contractSupplyQuantity, { timeout: 5000, visible: false }); } catch (_) {}
+  // 前回の「登録する」が完了しておらずインラインポップアップが開いたままなら、
+  // 同じ入力を繰り返さずに停止して人に知らせる（未入力の必須項目やバリデーションエラーの可能性）。
+  // ※保険外モードではサービス種類欄が「分類」に差し替わるため、特定要素ではなく
+  //   disableFormPopup配下のいずれかが表示中かどうかで「開いている」を判定する。
+  const isPopupOpen = () => [...document.querySelectorAll('[id^="disableFormPopup"]')].some((el) => {
+    const rc = el.getBoundingClientRect();
+    return rc.width > 0 && rc.height > 0;
+  });
+  if (isPopupOpen()) {
+    // 保存のajax処理中の可能性もあるため、閉じるのを少し待ってから判定する
+    const deadline = Date.now() + 8000;
+    while (isPopupOpen() && Date.now() < deadline) await sleep(500);
+    if (isPopupOpen()) {
+      // カイポケがポップアップ内に出している赤字のバリデーションエラーを拾って人に見せる
+      const errTexts = [...document.querySelectorAll('font[color], .err, .error, .errmsg, .txt-error, span[style*="color"], div[style*="color"]')]
+        .filter((e) => { const rc = e.getBoundingClientRect(); return rc.width > 0 && rc.height > 0; })
+        .map((e) => (e.textContent || '').replace(/\s+/g, ' ').trim())
+        .filter((t) => t && t.length <= 200);
+      return { phase: 'popupStuck', errors: [...new Set(errTexts)].slice(0, 5) };
     }
   }
 
-  // ③ 援助内容（フラット form:service:N）に全サービスの明細を順に入力
+  const existingRows = getExistingServices();
+  const savedSigs = loadSavedSigs();
+  const pending = services.filter((svc) => !svcAlreadyEntered(existingRows, svc) && savedSigs.indexOf(svcSig(svc)) < 0);
+  console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '保存済み署名:', savedSigs, '未処理:', pending.length);
+
+  // ① 基本情報＋援助目標（入力済みサービスが無い＝初回のみ）
+  if (!existingRows.length) {
+    // 作成年月日（必須欄）：JSONの作成日を入れる。解釈できない場合は実行日（今日）
+    await setWarekiDate(S.createdDate, basic.createdDate, { fallbackToday: true });
+    await fillInput(S.author, basic.author);
+    await fillInput(S.hopePerson, basic.personFamilyHope || basic.hopePerson);
+    await fillInput(S.assistanceGoal, basic.assistanceGoal || basic.longTermGoal);
+  }
+
+  // ② サービス追加ボタンが無い（＝新規画面。保存が先）なら、基本情報だけ入れて案内して終了
+  if (pending.length && !(await hasAddServiceButton())) {
+    return { phase: 'needSaveFirst' };
+  }
+
+  // ③ 未保存サービスがあれば「1件だけ」入力する（保存クリックは呼び出し側＝応答後）
+  // 【障害ポップアップの運用ルール 2026/07/14】
+  //   保険内: サービス種類=居宅介護/重度訪問介護
+  //     居宅介護    : サービス区分=AI解析結果(serviceCategory)
+  //     重度訪問介護: サービス区分=「重度訪問介護（障害支援区分６）」固定（修正は手入力）／訪問先=「居宅」固定／移動介護時間=手入力
+  //     共通        : 重複=原則「1人目」。派遣人数=2人同時作業(twoPersons)の場合のみ「2人」（通常は「-」のまま触らない）
+  //                   資格・運転・深夜の巡回型派遣分離・事業所と同一の建物の利用者減算は触らない
+  //   保険外: 【分類】=移動支援／サービス内容=「移動支援0円（1回0円）」／金額は触らない
+  if (pending.length) {
+    const svc = pending[0];
+    const svcNo = services.length - pending.length + 1; // 画面上のサービス番号（1始まり）
+    const addBtn = await waitForElement(S.addServiceButton);
+    await humanSleep(); safeClick(addBtn); await humanSleep();
+    await waitForElement(P.root); await humanSleep();
+    const isIdou = String(svc.serviceType || '').indexOf('移動支援') >= 0 || svc.insuranceType === '保険外';
+    await setRadio(isIdou ? P.insuranceOutside : P.insuranceInside);
+    await sleep(1000); // 保険区分の切替でフォーム項目が差し替わる（保険外は「分類」欄になる）
+    const tag = (label) => `サービス${svcNo}: ${label}`;
+    const soft = (label, value) => selectOptionByLabelSoft(label, value, { push: (s) => skipped.push(tag(s)) });
+    if (isIdou) {
+      await soft('分類', '移動支援');
+      await sleep(1000); // 分類選択のajaxでサービス内容ラジオが読み込まれる
+      try { await selectOption(P.servicePlant, svc.serviceOffice); }
+      catch (e) { skipped.push(tag('サービス事業所（選択肢と不一致）')); console.warn('サービス事業所は選択できずスキップ:', e && e.message); }
+      // サービス内容はラジオボタン（selectではない・実機確認 7/15）。「移動支援0円（1回・0円）」を選ぶ
+      await selectLabeledRadio('サービス内容', '移動支援0円', (s) => skipped.push(tag(s)));
+      await sleep(800); // 金額が自動更新される（金額は触らない）
+    } else {
+      await selectOption(P.serviceKind, svc.serviceType, { optionTimeout: 20000 }); // 居宅介護/重度訪問介護
+      await sleep(1000); // 種類選択のajaxでサービス区分等が出現
+      await selectOption(P.servicePlant, svc.serviceOffice, { optionTimeout: 15000 });
+      if (String(svc.serviceType || '').indexOf('重度訪問介護') >= 0) {
+        await soft('サービス区分', '重度訪問介護（障害支援区分６）');
+        await soft('訪問先', '居宅');
+      } else {
+        await soft('サービス区分', svc.serviceCategory);
+      }
+      await soft('重複', '1人目');
+      if (svc.twoPersons) await soft('派遣人数', '2人');
+    }
+    // 開始・終了時間（保険内=4桁テキスト／保険外=時・分select×6 の両形式に対応）
+    await fillShogaiTimes(P, svc, (s) => skipped.push(tag(s)));
+    for (const d of (svc.provisionDays || [])) await setCheckbox(P.checkedDay(d), true);
+    // 保存ボタン（保険外＝自立支援ポップアップは「登録する」表記でidも異なる場合がある。
+    // idで見つからなければ、ポップアップ内（disableFormPopup配下）から文言の部分一致で探す）
+    let regist = null;
+    try { regist = await waitForElement(P.regist, { timeout: 4000 }); } catch (_) {}
+    if (!regist) {
+      regist = [...document.querySelectorAll('a, button, input[type="button"], input[type="submit"], img')].find((e) => {
+        if (!e.closest('[id^="disableFormPopup"]')) return false; // メイン画面の「登録する」を誤爆しない
+        const t = ((e.value || '') + ((e.getAttribute && e.getAttribute('alt')) || '') + (e.textContent || '')).replace(/[\s　]/g, '');
+        return t.indexOf('登録する') >= 0 || t.indexOf('保存する') >= 0;
+      }) || null;
+    }
+    if (!regist) throw new Error('サービス設定の保存（登録する）ボタンが見つかりませんでした。ポップアップを×で閉じてから、この画面のスクショをシステム部に送ってください。');
+    await humanSleep();
+    return { phase: 'service', registEl: regist, svcNo, remaining: pending.length - 1, skipped, sig: svcSig(svc) };
+  }
+
+  // ④ 全サービス保存済み → 契約支給量・援助内容・説明日を入れて完了
+  for (let i = 0; i < services.length; i++) {
+    const svc = services[i];
+    if (svc.contractSupplyQuantity) {
+      // 契約支給量は数値（時間/月）のみ。AIが区分名（身体介護等）を出した場合は書き込まない
+      const q = z2h(String(svc.contractSupplyQuantity)).trim();
+      if (/^[0-9]+(\.[0-9]+)?$/.test(q)) {
+        try { await fillInput(S.supplyQty(i), q, { timeout: 5000, visible: false }); } catch (_) {}
+      } else {
+        skipped.push(`契約支給量（${i + 1}行目）: 「${svc.contractSupplyQuantity}」は数値でないため未入力（手動で時間数を入れてください）`);
+      }
+    }
+  }
+  // 援助内容（フラット form:service:N）に全サービスの明細を順に入力。
+  // 区分・項目がマスタ外の値でも止めない：項目は「その他」で代用し、最後に一覧で知らせる
   const details = [];
   services.forEach((svc) => (svc.supportDetails || []).forEach((d) => details.push(d)));
   for (let r = 0; r < details.length; r++) {
@@ -393,17 +871,28 @@ async function runShogai(profile, payload) {
       const addRow = document.querySelector(S.addSupportRow);
       if (addRow) { await humanSleep(); safeClick(addRow); await sleep(1000); }
     }
-    if (d.category) await selectOption(S.support.division(r), d.category, { visible: false });
-    if (d.item) await selectOption(S.support.item(r), d.item, { visible: false });
+    const rowTag = `援助内容${r + 1}行目`;
+    if (d.category) {
+      try { await selectOption(S.support.division(r), d.category, { visible: false, optionTimeout: 2000 }); }
+      catch (_) { skipped.push(`${rowTag}: 区分「${d.category}」が選択肢に無いためスキップ`); }
+    }
+    if (d.item) {
+      try { await selectOption(S.support.item(r), d.item, { visible: false, optionTimeout: 2000 }); }
+      catch (_) {
+        try {
+          await selectOption(S.support.item(r), 'その他', { visible: false, optionTimeout: 2000 });
+          skipped.push(`${rowTag}: 項目「${d.item}」が選択肢に無いため「その他」で代用`);
+        } catch (_) { skipped.push(`${rowTag}: 項目「${d.item}」が選択できずスキップ`); }
+      }
+    }
     if (d.requiredTime) await fillInput(S.support.time(r), d.requiredTime, { visible: false });
     if (d.notes) await fillInput(S.support.notes(r), d.notes, { visible: false });
     if (d.content) await fillInput(S.support.hope(r), d.content, { visible: false });
     await humanSleep();
   }
-
-  // ④ 説明日（作成状態・最終登録は人間）
+  // 説明日（作成状態・最終登録は人間）
   await setWarekiDate(S.deliveryDate, basic.explainDate);
-  return { count: services.length };
+  return { phase: 'done', count: services.length, skipped };
 }
 
 // =============================================================
@@ -427,15 +916,49 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         case 'GET_MODE':
           sendResponse({ ok: true, mode: PROFILE.mode, label: PROFILE.label });
           return;
-        case 'RUN_ALL': { // 障害（inline）
+        case 'RUN_ALL': { // 障害（inline）: 1フェーズだけ進めて応答する（backgroundが繰り返し呼ぶ）
           const result = await runShogai(PROFILE, message.payload);
-          sendResponse({ ok: true, message: `サービス ${result.count} 件の下書き入力が完了しました。` });
+          if (result.phase === 'service') {
+            // 保存クリックでページ全体が再読み込みされ応答チャネルが切れるため、先に応答を返す
+            sendResponse({ ok: true, phase: 'service', svcNo: result.svcNo, remaining: result.remaining, skipped: result.skipped || [] });
+            // クリック直前に「保存操作済み」を記録（ページ遷移で記録し損ねないよう楽観的に先へ書く。
+            // 保存が実際に失敗した場合はポップアップが開いたままになり popupStuck 検知で人に知らせる）
+            addSavedSig(result.sig);
+            await humanSleep(); await clickShogaiRegist(result.registEl);
+            return;
+          }
+          sendResponse({ ok: true, phase: result.phase, count: result.count || 0, skipped: result.skipped || [], errors: result.errors || [] });
+          return;
+        }
+        case 'HAS_ADD_BUTTON': sendResponse({ ok: true, has: await hasAddServiceButton() }); return;
+        case 'GET_EXISTING_SERVICES': sendResponse({ ok: true, services: getExistingServices() }); return;
+        case 'SELECT_SUPPORT_TAB': {
+          const tab = findSupportTab(message.number);
+          if (!tab) throw new Error('援助内容の「サービス' + message.number + '」タブが見つかりませんでした。');
+          const li = tab.closest('li');
+          if (li && String(li.className || '').indexOf('tab-on') >= 0) {
+            sendResponse({ ok: true, navigated: false }); // 既に選択済み。クリック不要
+            return;
+          }
+          // タブクリックはページ全体の再送信（画面遷移）になり応答チャネルが切れるため、先に応答を返す
+          sendResponse({ ok: true, navigated: true });
+          await humanSleep(); safeClick(tab);
           return;
         }
         case 'FILL_BASIC': await handleFillBasic(PROFILE, message.basicInfo); break;
-        case 'OPEN_SERVICE_MODAL': await handleOpenServiceModal(PROFILE); break;
-        case 'FILL_SERVICE': await handleFillServiceKaigo(PROFILE, message.service); break;
-        case 'FILL_SUPPORT': await handleFillSupport(PROFILE, message.index, message.supportDetails); break;
+        case 'OPEN_SERVICE_MODAL': await handleOpenServiceModal(PROFILE, message.insuranceType); break;
+        case 'FILL_SERVICE': {
+          const r = await handleFillServiceKaigo(PROFILE, message.service, message.basicInfo || {}, !!message.isYoshien);
+          // 保存クリックでこのウィンドウ自体が閉じて応答チャネルが切れるため、先に応答を返す
+          sendResponse({ ok: true, skipped: r.skipped });
+          safeClick(r.regist); // 保存→成功時ウィンドウは自動で閉じ、親画面がrefreshされる
+          return;
+        }
+        case 'FILL_SUPPORT': {
+          const supSkipped = await handleFillSupport(PROFILE, message.index, message.supportDetails);
+          sendResponse({ ok: true, skipped: supSkipped || [] });
+          return;
+        }
         case 'FILL_FOOTER': await handleFillFooter(PROFILE, message.basicInfo); break;
         default: throw new Error('未知のコマンド: ' + message.cmd);
       }

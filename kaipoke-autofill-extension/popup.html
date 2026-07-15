@@ -84,8 +84,16 @@
   <textarea id="jsonInput" placeholder='{&#10;  "basicInfo": { ... },&#10;  "services": [ ... ]&#10;}'></textarea>
 
   <div class="row">
-    <button id="sampleBtn" type="button">サンプルを挿入</button>
+    <button id="clearBtn" type="button">JSONをクリア</button>
     <button id="runBtn" class="primary" type="button">自動入力を実行</button>
+  </div>
+
+  <!-- 進捗表示（background からの PROGRESS 通知で更新。アイコンバッジにも同じ％が出る） -->
+  <div id="progressWrap" style="display:none; margin-top:10px;">
+    <div id="progressLabel" style="font-size:12px; color:#555; margin-bottom:4px;"></div>
+    <div style="background:#eee; border-radius:6px; height:10px; overflow:hidden;">
+      <div id="progressBar" style="background:#1976d2; height:100%; width:0%; transition:width .3s;"></div>
+    </div>
   </div>
 
   <div id="status" class="status-info"></div>

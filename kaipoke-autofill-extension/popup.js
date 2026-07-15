@@ -3,53 +3,62 @@
 // このファイルは DOM 操作もカイポケ通信も行わない。
 
 // -------------------------------------------------------------
-// サンプルJSON（実画面「訪問介護計画書 新規追加」に対応した構造）
-// 実データは「サービス提供責任者（サ責）」がAIで作成する（README参照）。
+// JSONデータは管理者ポータルの「訪問介護計画書 原案作成（AI下書き）」画面で作成し、
+// 「JSONをコピー」でここに貼り付ける運用（スキーマの詳細は README 参照）。
 // ※ select 項目（適用期間・事業所・ケアマネ・サービス種類・サービス項目）は
 //   カイポケに登録済みの選択肢と「完全一致」する文字列にすること。
 // -------------------------------------------------------------
-const SAMPLE_JSON = {
-  basicInfo: {
-    createdDate: "令和8年7月13日",
-    insurancePeriod: "令和8年2月2日から令和9年2月28日まで",
-    author: "山本 禎典",
-    careOffice: "向日葵 介護センター",
-    careManager: "矢部 房子",
-    issues: "自宅で安全に生活を継続すること。",
-    longTermGoal: "住み慣れた自宅で自立した生活を送れる。",
-    shortTermGoal: "入浴・清潔保持を安全に行える。",
-    personFamilyHope: "できる限り自宅で過ごしたい。",
-    notes: "母国語が話せるヘルパーを派遣いたします。",
-    explainDate: "令和8年4月8日",
-    explainer: "麻生 操子"
-  },
-  services: [
-    {
-      insuranceType: "保険内",
-      serviceType: "身体生活",
-      serviceOffice: "訪問介護 いっぽ(2371005485)",
-      serviceContent: "入浴介助・生活援助",
-      units: "75",
-      startTime: "08:00",
-      endTime: "09:15",
-      additions: [],
-      provisionCycle: "毎週",
-      provisionNthWeek: null,
-      provisionDays: ["月", "水", "金"],
-      supportDetails: [
-        { category: "身体", item: "全身浴",   content: "入浴介助または清拭", requiredTime: "20", notes: "" },
-        { category: "身体", item: "更衣介助", content: "洗面等、着替え、歯磨き", requiredTime: "10", notes: "" },
-        { category: "生活", item: "掃除",     content: "居室、トイレ、浴室、台所などの掃除", requiredTime: "80", notes: "" }
-      ]
-    }
-  ]
-};
 
 const statusEl = document.getElementById("status");
 function setStatus(message, kind = "info") {
   statusEl.textContent = message;
   statusEl.className = "status-" + kind;
 }
+
+// -------------------------------------------------------------
+// 進捗表示：background からの PROGRESS 通知でバーとラベルを更新
+// -------------------------------------------------------------
+function setProgress(percent, label) {
+  const wrap = document.getElementById("progressWrap");
+  const bar = document.getElementById("progressBar");
+  const labelEl = document.getElementById("progressLabel");
+  wrap.style.display = "block";
+  const pct = Math.max(0, Math.min(100, Math.round(percent || 0)));
+  bar.style.width = pct + "%";
+  labelEl.textContent = pct + "%　" + (label || "");
+}
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.type === "PROGRESS") setProgress(msg.percent, msg.label);
+});
+
+// ポップアップを開き直したとき、実行中なら現在の進捗をすぐ復元表示する
+// （工程の合間は通知が来ないため、これが無いと開き直し直後にバーが出ない）
+chrome.storage.local.get("kaipokeProgress", (d) => {
+  var p = d && d.kaipokeProgress;
+  if (p && typeof p.percent === "number" && p.percent < 100 && Date.now() - (p.ts || 0) < 10 * 60 * 1000) {
+    setProgress(p.percent, p.label + "（実行中）");
+  }
+});
+
+// -------------------------------------------------------------
+// JSONの自動保存・復元
+// ポップアップは「登録する」等でフォーカスが外れると閉じてしまうため、
+// テキストエリアの内容を常に chrome.storage.local へ保存し、次に開いたとき復元する。
+// （2段階運用＝登録→編集画面で同じJSONを再実行、がこれでシームレスになる）
+// -------------------------------------------------------------
+const jsonInputEl = document.getElementById("jsonInput");
+function saveJsonDraft() {
+  try { chrome.storage.local.set({ kaipokeJsonDraft: jsonInputEl.value }); } catch (_) {}
+}
+chrome.storage.local.get("kaipokeJsonDraft", (data) => {
+  const saved = data && data.kaipokeJsonDraft;
+  if (typeof saved === "string" && saved.trim() && !jsonInputEl.value) {
+    jsonInputEl.value = saved;
+    setStatus("前回のJSONを復元しました。そのまま「自動入力を実行」で再開できます。", "info");
+  }
+});
+jsonInputEl.addEventListener("input", saveJsonDraft);
 
 // -------------------------------------------------------------
 // 入力JSONの簡易バリデーション
@@ -66,16 +75,22 @@ function validatePayload(data) {
   });
 }
 
-// 「サンプルを挿入」
-document.getElementById("sampleBtn").addEventListener("click", () => {
-  document.getElementById("jsonInput").value = JSON.stringify(SAMPLE_JSON, null, 2);
-  setStatus("サンプルを挿入しました。内容を編集して実行してください。", "info");
+// 「JSONをクリア」
+// テキストエリアと自動保存済みの下書き（kaipokeJsonDraft）を両方消す。
+// 消し忘れた前回分が次の利用者に復元される事故を防ぐためのボタン。
+document.getElementById("clearBtn").addEventListener("click", () => {
+  if (jsonInputEl.value.trim() && !confirm("入力中のJSONデータを消去します。よろしいですか？")) return;
+  jsonInputEl.value = "";
+  try { chrome.storage.local.remove(["kaipokeJsonDraft", "kaipokeProgress"]); } catch (_) {}
+  document.getElementById("progressWrap").style.display = "none";
+  setStatus("JSONデータをクリアしました。原案作成アプリで作成したJSONを貼り付けてください。", "info");
 });
 
 // 「自動入力を実行」
 document.getElementById("runBtn").addEventListener("click", async () => {
   const raw = document.getElementById("jsonInput").value.trim();
   if (!raw) { setStatus("JSONを貼り付けてください。", "error"); return; }
+  saveJsonDraft(); // 実行時点の内容を確実に保存（登録ボタン等でポップアップが閉じても復元できるように）
 
   let payload;
   try {
@@ -101,7 +116,8 @@ document.getElementById("runBtn").addEventListener("click", async () => {
   }
 
   // ★ポップアップブロックの注意（サービス設定は別ウィンドウで開く）
-  setStatus("自動入力を開始しました。\n※サービス設定は別ウィンドウで開きます。ポップアップがブロックされないよう許可してください。\nカイポケ画面の進捗をご確認ください…", "info");
+  setStatus("自動入力を開始しました。\n※サービス設定は別ウィンドウで開きます。ポップアップがブロックされないよう許可してください。", "info");
+  setProgress(0, "開始しています…");
 
   // background.js（調整役）へ開始依頼。メインタブID を渡す。
   try {
