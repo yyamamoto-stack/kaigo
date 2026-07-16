@@ -123,6 +123,26 @@
 
   <div id="status" class="status-info"></div>
 
+  <!-- ============================================================
+       実績の備考へ サ責確認コメントを一括追記（介護保険・障害 共通）
+       ①スキャン＝読み取りのみで件数を確認 → ②追記 の二段階（フェイルセーフ）
+       ============================================================ -->
+  <hr style="margin:16px 0 12px; border:none; border-top:1px solid #ddd;">
+  <h1>実績の備考へ サ責コメント追記</h1>
+  <div class="note">
+    実績（毎日実績）の画面を開いてから実行してください。<br>
+    備考欄の<strong>既存コメントの手前</strong>に下のコメントを追記します
+    （既に【サ責】が入っている欄はスキップ）。<br>
+    ⚠️ 追記後の<strong>「登録／保存」は必ずご自身で</strong>押してください。<br>
+    従業員（ヘルパー）ごとに画面を切り替えて、同じ手順を繰り返してください（同じ日は同じ時刻が入ります）。
+  </div>
+  <div id="jissekiPreview" style="font-size:12px; background:#f5f5f5; border:1px solid #ddd; border-radius:6px; padding:6px 8px; margin-bottom:8px;">追記コメントを準備中…</div>
+  <div class="row" style="margin-top:0;">
+    <button id="jissekiScanBtn" type="button">① 備考欄を確認</button>
+    <button id="jissekiFillBtn" class="primary" type="button">② コメントを追記</button>
+  </div>
+  <div id="jissekiStatus" class="status-info" style="margin-top:8px; font-size:12px; white-space:pre-wrap;"></div>
+
   <!-- 外部スクリプトは読み込まず、popup.js のみ（CSP準拠） -->
   <script src="popup.js"></script>
 </body>

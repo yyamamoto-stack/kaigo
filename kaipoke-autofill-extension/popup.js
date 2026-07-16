@@ -134,6 +134,19 @@ chrome.storage.local.get("kaipokeJsonDraft", (data) => {
 jsonInputEl.addEventListener("input", saveJsonDraft);
 
 // -------------------------------------------------------------
+// 対象タブ（＝カイポケの画面）の取得（計画書・実績備考の両機能で共通）
+// サイドパネル/別ウィンドウのどちらから実行されても動くよう、全ウィンドウのアクティブタブから
+// カイポケ（kaipoke.biz）のタブを探す（URLはhost_permissionsの範囲内のみ見える）。
+// 複数ウィンドウでカイポケを開いている場合は、最後に触ったタブを対象にする。
+// -------------------------------------------------------------
+async function findKaipokeTab() {
+  const tabs = await chrome.tabs.query({ active: true });
+  const kaipokeTabs = tabs.filter((t) => t.id && /^https:\/\/[^/]*kaipoke\.biz\//.test(t.url || ""));
+  kaipokeTabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+  return kaipokeTabs[0];
+}
+
+// -------------------------------------------------------------
 // 入力JSONの簡易バリデーション
 // -------------------------------------------------------------
 function validatePayload(data) {
@@ -177,15 +190,9 @@ document.getElementById("runBtn").addEventListener("click", async () => {
   }
 
   // 対象タブ（＝カイポケのメイン画面）の取得。
-  // サイドパネル/別ウィンドウのどちらから実行されても動くよう、全ウィンドウのアクティブタブから
-  // カイポケ（kaipoke.biz）のタブを探す（URLはhost_permissionsの範囲内のみ見える）。
   let tab;
   try {
-    const tabs = await chrome.tabs.query({ active: true });
-    const kaipokeTabs = tabs.filter((t) => t.id && /^https:\/\/[^/]*kaipoke\.biz\//.test(t.url || ""));
-    // 複数ウィンドウでカイポケを開いている場合は、最後に触ったタブを対象にする
-    kaipokeTabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
-    tab = kaipokeTabs[0];
+    tab = await findKaipokeTab();
   } catch (e) {
     setStatus("アクティブタブの取得に失敗しました：" + e.message, "error");
     return;
@@ -217,5 +224,107 @@ document.getElementById("runBtn").addEventListener("click", async () => {
     }
   } catch (e) {
     setStatus("拡張機能と通信できませんでした。カイポケの計画書画面で拡張機能を再読み込みしてください。\n詳細：" + e.message, "error");
+  }
+});
+
+// =============================================================
+// 実績の備考へ サ責確認コメントを一括追記（v2.18.0）
+// コメント形式：【サ責】山本禎典 R8.7.17 10:07
+//   ・日付＝実行日の翌日（和暦R表記）
+//   ・時刻＝10:00〜10:30 のランダム。同じ日付には同じ時刻を使う（storageに日付→時刻を保存し、
+//     従業員を切り替えて何回実行しても・再実行しても同じ時刻になる）
+// 書き込み自体は content.js（JISSEKI_SCAN／JISSEKI_FILL）が行う。
+// =============================================================
+const JISSEKI_NAME = "【サ責】山本禎典";
+const jissekiStatusEl = document.getElementById("jissekiStatus");
+function setJissekiStatus(message, kind = "info") {
+  jissekiStatusEl.textContent = message;
+  jissekiStatusEl.className = "status-" + kind;
+}
+const pad2 = (n) => String(n).padStart(2, "0");
+
+// 追記コメントを組み立てる（翌日の日付＋日付ごとに固定のランダム時刻）
+async function jissekiBuildComment() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1); // 翌日
+  const dateKey = d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
+  const wareki = "R" + (d.getFullYear() - 2018) + "." + (d.getMonth() + 1) + "." + d.getDate(); // 令和元年=2019
+  const data = await chrome.storage.local.get("kaipokeJissekiTimes");
+  const times = (data && data.kaipokeJissekiTimes) || {};
+  let time = times[dateKey];
+  if (!time) {
+    time = "10:" + pad2(Math.floor(Math.random() * 31)); // 10:00〜10:30
+    // 60日より古い日付の記録は掃除してから保存
+    const limit = Date.now() - 60 * 24 * 60 * 60 * 1000;
+    for (const k of Object.keys(times)) {
+      if (new Date(k + "T00:00:00").getTime() < limit) delete times[k];
+    }
+    times[dateKey] = time;
+    await chrome.storage.local.set({ kaipokeJissekiTimes: times });
+  }
+  return { text: `${JISSEKI_NAME} ${wareki} ${time}`, dateKey, time };
+}
+
+// パネルを開いた時点で追記コメントのプレビューを表示（時刻もこの時点で確定・保存される）
+async function jissekiRenderPreview() {
+  try {
+    const c = await jissekiBuildComment();
+    document.getElementById("jissekiPreview").textContent =
+      "追記コメント：" + c.text + "\n（日付=翌日固定・同じ日は同じ時刻）";
+  } catch (e) {
+    document.getElementById("jissekiPreview").textContent = "コメントの準備に失敗：" + e.message;
+  }
+}
+jissekiRenderPreview();
+
+// content.js へコマンドを送る（実績備考用）
+async function jissekiSend(cmd, extra = {}) {
+  const tab = await findKaipokeTab();
+  if (!tab || !tab.id) throw new Error("カイポケ（kaipoke.biz）の実績画面を開いた状態で実行してください。");
+  let res;
+  try {
+    res = await chrome.tabs.sendMessage(tab.id, { cmd, ...extra });
+  } catch (e) {
+    throw new Error("カイポケのページと通信できませんでした。ページを再読み込み（F5）してから再実行してください。\n詳細：" + e.message);
+  }
+  if (!res) throw new Error("ページから応答がありませんでした。ページを再読み込み（F5）してから再実行してください。");
+  if (!res.ok) throw new Error(res.message || "不明なエラー");
+  return res;
+}
+
+// ① 備考欄を確認（読み取りのみ。何も書き込まない）
+document.getElementById("jissekiScanBtn").addEventListener("click", async () => {
+  setJissekiStatus("備考欄を探しています…", "info");
+  try {
+    const r = await jissekiSend("JISSEKI_SCAN");
+    if (!r.total) {
+      setJissekiStatus("この画面に「備考」の入力欄が見つかりませんでした。\n実績の入力画面（備考欄が編集できる状態）を開いてから実行してください。\nそれでも見つからない場合は、画面を Ctrl+S でHTML保存してシステム部に解析を依頼してください。", "error");
+      return;
+    }
+    const groupLines = Object.entries(r.groups || {}).map(([k, v]) => `・${k}：${v}件`).join("\n");
+    const sampleLines = (r.samples || []).map((s) => `　${s.id}：「${s.value}${s.value.length >= 30 ? "…" : ""}」`).join("\n");
+    setJissekiStatus(
+      `備考欄 ${r.total}件（うち追記済み ${r.already}件）\n${groupLines}\n先頭の内容（確認用）：\n${sampleLines}\n\n問題なければ「② コメントを追記」を押してください。`,
+      "ok"
+    );
+  } catch (e) {
+    setJissekiStatus("確認できませんでした：" + e.message, "error");
+  }
+});
+
+// ② コメントを追記（既に【サ責】が入っている欄はスキップ）
+document.getElementById("jissekiFillBtn").addEventListener("click", async () => {
+  try {
+    const c = await jissekiBuildComment();
+    setJissekiStatus("追記しています…（1欄ごとに0.5〜1.5秒の間隔をあけて入力します）\n追記コメント：" + c.text, "info");
+    const r = await jissekiSend("JISSEKI_FILL", { comment: c.text });
+    setJissekiStatus(
+      `完了：追記 ${r.done}件／スキップ（追記済み）${r.already}件（対象 ${r.total}件）\n` +
+      `⚠️ 内容を目視確認のうえ、画面の「登録／保存」はご自身で押してください。\n` +
+      `次の従業員の実績画面に切り替えて、同じ手順（①→②）を繰り返してください。`,
+      "ok"
+    );
+  } catch (e) {
+    setJissekiStatus("停止しました：" + e.message, "error");
   }
 });

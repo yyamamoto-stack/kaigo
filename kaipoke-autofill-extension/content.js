@@ -1226,6 +1226,111 @@ async function fillShogaiSupportTab(S, svc, tabIdx, skipped) {
 }
 
 // =============================================================
+// 実績備考：サ責確認コメントの一括追記（v2.18.0）
+// 対象：介護保険・障害サービスの実績画面（毎日実績）。計画書とは別の独立機能。
+// 画面上の「備考」列の入力欄（textarea / text input）を探し、既存コメントの手前に
+// 「【サ責】山本禎典 R8.7.17 10:07」形式のコメントを追記する。
+//   ・JISSEKI_SCAN … 読み取りのみ（何件・どの列かをユーザーに見せる。フェイルセーフ）
+//   ・JISSEKI_FILL … 追記の実行。既に【サ責】が入っている欄はスキップ（二重追記防止）
+//   ・最終の「登録／保存」は必ず人間が押す（自動では押さない。claude.md 4章）
+// 実績画面のMEMコード・実DOMは未確認のためURL判定はせず、汎用の列検出＋二段階実行で安全を担保する。
+// =============================================================
+const JISSEKI = {
+  markerRe: /【サ責】/,                    // 追記済み判定（この文字列があれば触らない）
+  headerWords: ['備考'],                   // 備考列とみなす列見出しの文言
+  idHints: /biko|remark|memo|comment/i,    // id/name からの補助判定（見出しが取れない画面の保険）
+};
+
+// 書き込んでよい欄か（表示中・編集可のテキスト欄のみ）
+function jissekiIsWritable(el) {
+  if (!el || el.disabled || el.readOnly) return false;
+  const s = window.getComputedStyle(el);
+  if (s.display === 'none' || s.visibility === 'hidden') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+}
+
+// 画面上の「備考」入力欄を収集する。
+// A) テーブルの列見出しに「備考」を含む列のセル内の入力欄（メイン判定）
+// B) id/name に biko/remark/memo/comment を含む入力欄（補助判定）
+function jissekiCollectFields() {
+  const found = [];
+  const seen = new Set();
+  const add = (el, source) => {
+    if (!el || seen.has(el)) return;
+    const isText = (el.tagName === 'TEXTAREA') || (el.tagName === 'INPUT' && (el.type || 'text').toLowerCase() === 'text');
+    if (!isText || !jissekiIsWritable(el)) return;
+    seen.add(el);
+    found.push({ el, source });
+  };
+  document.querySelectorAll('table').forEach((table, ti) => {
+    const rows = Array.from(table.rows || []);
+    if (rows.length < 2) return;
+    // 見出し行＝thを含む最初の行（無ければ先頭行）
+    const headerRow = rows.find((r) => r.querySelector('th')) || rows[0];
+    const bikoCols = [];
+    Array.from(headerRow.cells || []).forEach((c, i) => {
+      const t = (c.textContent || '').replace(/[\s　]/g, '');
+      if (JISSEKI.headerWords.some((w) => t.includes(w))) bikoCols.push(i);
+    });
+    if (!bikoCols.length) return;
+    rows.forEach((r) => {
+      if (r === headerRow) return;
+      bikoCols.forEach((ci) => {
+        const cell = r.cells && r.cells[ci];
+        if (cell) cell.querySelectorAll('textarea, input[type="text"], input:not([type])').forEach((el) => add(el, `表${ti + 1}「備考」列`));
+      });
+    });
+  });
+  document.querySelectorAll('textarea, input[type="text"], input:not([type])').forEach((el) => {
+    if (JISSEKI.idHints.test((el.id || '') + ' ' + (el.name || ''))) add(el, 'id/name判定');
+  });
+  return found;
+}
+
+// スキャン結果の要約（popupに表示する）
+function jissekiScanSummary() {
+  const fields = jissekiCollectFields();
+  const groups = {};
+  let already = 0;
+  fields.forEach((f) => {
+    groups[f.source] = (groups[f.source] || 0) + 1;
+    if (JISSEKI.markerRe.test(String(f.el.value || ''))) already++;
+  });
+  const samples = fields.slice(0, 5).map((f) => ({
+    id: f.el.id || f.el.name || '(idなし)',
+    value: String(f.el.value || '').slice(0, 30),
+  }));
+  return { total: fields.length, already, groups, samples, title: document.title };
+}
+
+// コメントを各備考欄の先頭へ追記する。
+// カイポケにはonblurのajaxで1項目ずつ確定する画面があるため、入力ごとにblurを発火し、
+// 操作の間に必ず humanSleep（0.5〜1.5秒）を挟む（コンプライアンス 1-2）。
+async function jissekiFillRemarks(comment) {
+  const fields = jissekiCollectFields();
+  if (!fields.length) {
+    throw new Error('この画面に「備考」の入力欄が見つかりませんでした。' +
+      '実績の入力画面（備考欄が編集できる状態）を開いてから実行してください。' +
+      'それでも見つからない場合は、この画面を Ctrl+S でHTML保存してシステム部に解析を依頼してください。');
+  }
+  let done = 0, already = 0;
+  for (const f of fields) {
+    const cur = String(f.el.value || '');
+    if (JISSEKI.markerRe.test(cur)) { already++; continue; } // 追記済み＝人の確認済みコメントを二重にしない
+    const sep = cur ? (f.el.tagName === 'TEXTAREA' ? '\n' : ' ') : '';
+    setNativeValue(f.el, comment + sep + cur);
+    f.el.dispatchEvent(new FocusEvent('blur'));
+    await humanSleep();
+    done++;
+  }
+  const result = { total: fields.length, done, already };
+  // サイドパネルが途中で閉じて応答が届かなくても結果を確認できるよう保存しておく
+  try { chrome.storage.local.set({ kaipokeJissekiLast: { ...result, title: document.title, ts: Date.now() } }); } catch (_) {}
+  return result;
+}
+
+// =============================================================
 // 役割判定・メッセージ受信
 // =============================================================
 const PROFILE = detectProfile();
@@ -1241,6 +1346,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || !message.cmd) return;
   (async () => {
     try {
+      // ---- 実績備考（計画書のPROFILE判定より前に処理：実績画面はPROFILE=nullのため） ----
+      if (message.cmd === 'JISSEKI_SCAN') {
+        sendResponse({ ok: true, ...jissekiScanSummary() });
+        return;
+      }
+      if (message.cmd === 'JISSEKI_FILL') {
+        if (!message.comment || !String(message.comment).trim()) throw new Error('追記するコメントが空です。');
+        const r = await jissekiFillRemarks(String(message.comment));
+        sendResponse({ ok: true, ...r });
+        return;
+      }
       if (!PROFILE) throw new Error('この画面は対応する計画書ページとして認識できませんでした。');
       switch (message.cmd) {
         case 'GET_MODE':
