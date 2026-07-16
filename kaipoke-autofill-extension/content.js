@@ -775,6 +775,48 @@ const supportDoneKey = () => 'kaipokeSupportDone:' + getPlanId();
 function getSupportDone() { try { return parseInt(sessionStorage.getItem(supportDoneKey()) || '0', 10) || 0; } catch (_) { return 0; } }
 function setSupportDone(n) { try { sessionStorage.setItem(supportDoneKey(), String(n)); } catch (_) {} }
 
+// 【v2.16.0】表示用マーカー：援助内容を「入力した」タブ数（検証前でも工程リストに済みと出すため）
+const supDispKey = () => 'kaipokeSupDisp:' + getPlanId();
+function getSupDisp() { try { return parseInt(sessionStorage.getItem(supDispKey()) || '0', 10) || 0; } catch (_) { return 0; } }
+function setSupDisp(n) { try { sessionStorage.setItem(supDispKey(), String(Math.max(getSupDisp(), n))); } catch (_) {} }
+// 備考（計画予定表タブ）を入力済みかのマーカー。保険内タブからは備考欄が見えないため記録で持つ
+const remarksDoneKey = () => 'kaipokeRemarksDone:' + getPlanId();
+function getRemarksDone() { try { return sessionStorage.getItem(remarksDoneKey()) === '1'; } catch (_) { return false; } }
+function markRemarksDone() { try { sessionStorage.setItem(remarksDoneKey(), '1'); } catch (_) {} }
+
+// 【v2.16.0】工程リスト（プラン）：実行前に全工程を作り、進むたびに済み/実行中/エラーを
+// 見える化する（ポップアップUIに表示）。状態はDOMとマーカーから毎回導出＝常に実態と一致。
+const planStepsKey = () => 'kaipokePlanSteps:' + getPlanId();
+function storeSteps(steps) { try { sessionStorage.setItem(planStepsKey(), JSON.stringify(steps)); } catch (_) {} }
+function loadSteps() { try { return JSON.parse(sessionStorage.getItem(planStepsKey()) || 'null') || []; } catch (_) { return []; } }
+function patchStep(steps, id, state) { const s = (steps || []).find((x) => x.id === id); if (s) s.state = state; return steps; }
+function buildPlanSteps(S, services, nonIdou, idouSvcs, pending, idouDone, basic) {
+  const registered = nonIdou.length - pending.length;
+  const supDone = Math.max(getSupportDone(), getSupDisp());
+  const dayStr = (svc) => (svc.provisionDays || []).join('');
+  const goalEl = document.querySelector(S.assistanceGoal);
+  const basicDone = registered > 0 || !!(goalEl && String(goalEl.value || '').trim());
+  const steps = [{ id: 'basic', label: '基本情報・援助目標・契約支給量', state: basicDone ? 'done' : 'todo' }];
+  nonIdou.forEach((svc, k) => {
+    const n = services.indexOf(svc) + 1;
+    steps.push({ id: 'svc' + n, label: `サービス${n} 設定登録（保険内 ${svc.startTime || ''}〜${svc.endTime || ''} ${dayStr(svc)}）`, state: k < registered ? 'done' : 'todo' });
+    if ((svc.supportDetails || []).length) {
+      steps.push({ id: 'sup' + n, label: `サービス${n} 援助内容の入力（${svc.supportDetails.length}行）`, state: k < supDone ? 'done' : 'todo' });
+    } else {
+      steps.push({ id: 'sup' + n, label: `サービス${n} 援助内容：明細なし（手動入力）`, state: 'warn' });
+    }
+  });
+  idouSvcs.forEach((svc, k) => {
+    const n = services.indexOf(svc) + 1;
+    steps.push({ id: 'svc' + n, label: `サービス${n} 設定登録（移動支援・保険外 ${svc.startTime || ''}〜${svc.endTime || ''} ${dayStr(svc)}）`, state: k < idouDone ? 'done' : 'todo' });
+  });
+  if (String((basic || {}).remarks || '').trim()) {
+    steps.push({ id: 'remarks', label: '【計画予定表】タブ：備考の入力', state: getRemarksDone() ? 'done' : 'todo' });
+  }
+  steps.push({ id: 'footer', label: '説明日の入力（仕上げ）', state: 'todo' });
+  return steps;
+}
+
 // 週間計画表の行テキストと照合して、このサービスが入力済みかを判定（backgroundの判定と同じロジック）
 function svcAlreadyEntered(existingRows, svc) {
   const st = String(svc.startTime || ''), et = String(svc.endTime || '');
@@ -811,8 +853,42 @@ async function runShogai(profile, payload) {
         .filter((e) => { const rc = e.getBoundingClientRect(); return rc.width > 0 && rc.height > 0; })
         .map((e) => (e.textContent || '').replace(/\s+/g, ' ').trim())
         .filter((t) => t && t.length <= 200);
-      return { phase: 'popupStuck', errors: [...new Set(errTexts)].slice(0, 5) };
+      return { phase: 'popupStuck', errors: [...new Set(errTexts)].slice(0, 5), steps: loadSteps() };
     }
+  }
+
+  // 【v2.16.0 二重登録バグの根治】週間計画表の行データ（登録済み判定の根拠）は【保険内】タブの
+  // DOMにしか存在しない。【計画予定表】タブ上で判定すると全サービスが「未登録」に見えて
+  // サービス1から再追加してしまう（v2.15.0実機で発生：重複エラー MEM_0977_0005）。
+  // → 計画予定表タブでは備考・説明日だけを処理し、それ以外は【保険内】タブへ戻ってから行う。
+  if (isYoteiTabActive()) {
+    const steps2 = loadSteps();
+    const remarks2 = String(basic.remarks || '').trim();
+    const ta = document.querySelector(REMARKS_SEL);
+    if (remarks2 && ta && String(ta.value || '').trim() !== remarks2) {
+      await setTextPersist(REMARKS_SEL, remarks2);
+      await setWarekiDate(S.deliveryDate, basic.explainDate);
+      markRemarksDone();
+      patchStep(steps2, 'remarks', 'done'); storeSteps(steps2);
+      return { phase: 'remarkFilled', skipped, steps: steps2 };
+    }
+    if (remarks2) { markRemarksDone(); patchStep(steps2, 'remarks', 'done'); storeSteps(steps2); }
+    // 備考は済み（または不要）。このタブでは他の工程の状況が分からないため【保険内】タブへ戻る
+    const backTab = findPlanTabLink('保険内');
+    if (backTab) return { phase: 'switchTab', tabEl: backTab, label: '保険内', skipped, steps: steps2 };
+    // 万一戻れない場合は説明日だけ入れて完了扱い（サービスの追加はこのタブでは行わない）
+    await setWarekiDate(S.deliveryDate, basic.explainDate);
+    patchStep(steps2, 'footer', 'done'); storeSteps(steps2);
+    return { phase: 'done', count: services.length, skipped, steps: steps2 };
+  }
+  // 【保険外】タブがアクティブな場合も登録状況を正しく判定できないため、先に【保険内】タブへ戻る
+  const activeTabLi = (() => {
+    const box = document.querySelector('[id="form:divTab"]');
+    return box ? [...box.querySelectorAll('li')].find((l) => !l.querySelector('a')) : null;
+  })();
+  if (activeTabLi && (activeTabLi.textContent || '').indexOf('保険外') >= 0) {
+    const backTab = findPlanTabLink('保険内');
+    if (backTab) return { phase: 'switchTab', tabEl: backTab, label: '保険内', skipped, steps: loadSteps() };
   }
 
   const existingRows = getExistingServices();
@@ -830,6 +906,10 @@ async function runShogai(profile, payload) {
   const idouPending = idouSvcs.slice(idouDone);
   console.log('[kaipoke-autofill] 既存行:', existingRows.map((e) => e.text), '未処理(保険内):', pending.length, '移動支援 登録済:', idouDone, '/', idouSvcs.length);
 
+  // 工程リスト（プラン）を毎回DOMの実態から作り直す（ポップアップに表示される）
+  const steps = buildPlanSteps(S, services, nonIdou, idouSvcs, pending, idouDone, basic);
+  storeSteps(steps);
+
   // ① 基本情報＋援助目標（入力済みサービスが無い＝初回のみ）
   if (!existingRows.length) {
     // 入力前に基本情報が「空だった」か記録する（今回このrunで初めて入れたかの判定に使う）
@@ -846,7 +926,7 @@ async function runShogai(profile, payload) {
     const anyToAdd = pending.length || idouPending.length; // 追加するサービスが保険内/移動支援いずれかある
     // ② サービス追加ボタンが無い（＝新規画面。保存が先）なら案内して終了
     if (anyToAdd && !(await hasAddServiceButton())) {
-      return { phase: 'needSaveFirst' };
+      return { phase: 'needSaveFirst', steps: patchStep(steps, 'basic', 'done') };
     }
     // ②' 編集画面だが基本情報を今回このrunで初めて入れた場合、サービス追加の前に人が保存する。
     //     未保存のままサービス追加ボタン（フォーム送信リンク）を押すと移動確認ダイアログが
@@ -854,7 +934,7 @@ async function runShogai(profile, payload) {
     const hasBasicData = !!(basic.assistanceGoal || basic.longTermGoal || basic.author ||
       basic.personFamilyHope || basic.hopePerson || basic.createdDate);
     if (wasEmpty && hasBasicData && anyToAdd) {
-      return { phase: 'needBasicSave' };
+      return { phase: 'needBasicSave', steps: patchStep(steps, 'basic', 'done') };
     }
   }
 
@@ -882,20 +962,22 @@ async function runShogai(profile, payload) {
       // 黙って次へ進むと「入力されなかった」ように見えるため、完了メッセージで必ず知らせる。
       skipped.push(`サービス${services.indexOf(lastSvc) + 1}: 援助内容の明細（supportDetails）がJSONにありません。原案画面で再生成するか、カイポケで手動入力してください`);
     } else if (getSupportDone() < registeredCount) {
+      const supId = 'sup' + (services.indexOf(lastSvc) + 1);
       if (tabs.length <= lastIdx) {
         // 保存直後で援助内容の「サービスN」タブがまだ画面に出ていない
         // → 人が計画書の「登録する」を押してから再実行してもらう（フェイルセーフ）
-        return { phase: 'tabMissing', svcNo: lastIdx + 1, skipped };
+        return { phase: 'tabMissing', svcNo: lastIdx + 1, skipped, steps };
       }
       if (activeIdx !== lastIdx) {
         const a = tabs[lastIdx].querySelector('a') || tabs[lastIdx];
-        return { phase: 'supportSwitch', tabEl: a, next: lastIdx + 1, skipped };
+        return { phase: 'supportSwitch', tabEl: a, next: lastIdx + 1, skipped, steps: patchStep(steps, supId, 'run') };
       }
       if (!supportTabFilled(S, lastSvc)) {
         await fillShogaiSupportTab(S, lastSvc, lastIdx, skipped);
-        return { phase: 'supportFilled', tabNo: lastIdx + 1, skipped };
+        return { phase: 'supportFilled', tabNo: lastIdx + 1, skipped, steps: patchStep(steps, supId, 'done') };
       }
       setSupportDone(registeredCount); // 入力済みをDOMで確認できたので、以後この確認は省略
+      patchStep(steps, supId, 'done'); storeSteps(steps);
     }
   }
 
@@ -967,7 +1049,7 @@ async function runShogai(profile, payload) {
     }
     if (!regist) throw new Error('サービス設定の保存（登録する）ボタンが見つかりませんでした。ポップアップを×で閉じてから、この画面のスクショをシステム部に送ってください。');
     await humanSleep();
-    return { phase: 'service', registEl: regist, svcNo, remaining: totalRemainingAfter, skipped, isIdou, kind: isIdou ? '移動支援' : '保険内' };
+    return { phase: 'service', registEl: regist, svcNo, remaining: totalRemainingAfter, skipped, isIdou, kind: isIdou ? '移動支援' : '保険内', steps: patchStep(steps, 'svc' + svcNo, 'run') };
   }
 
   // ⑤ 全サービス登録済み → 残っている援助内容（サービスNタブごと）→ 備考 → 説明日
@@ -988,45 +1070,37 @@ async function runShogai(profile, payload) {
     // 表示中タブが未入力なら、入力して停止（人が「登録する」で保存）
     if (needsSupport(cur) && !supportTabFilled(S, cur)) {
       await fillShogaiSupportTab(S, cur, activeIdx, skipped);
-      return { phase: 'supportFilled', tabNo: activeIdx + 1, skipped };
+      return { phase: 'supportFilled', tabNo: activeIdx + 1, skipped, steps: patchStep(steps, 'sup' + (services.indexOf(cur) + 1), 'done') };
     }
     // 表示中タブは済み（or 明細なし・保険外）→ 次の入力が必要なタブへ切替
     for (let k = activeIdx + 1; k < Math.min(tabs.length, orderedServices.length); k++) {
       if (!needsSupport(orderedServices[k])) continue;
       const a = tabs[k].querySelector('a') || tabs[k];
-      return { phase: 'supportSwitch', tabEl: a, next: k + 1, skipped };
+      return { phase: 'supportSwitch', tabEl: a, next: k + 1, skipped, steps: patchStep(steps, 'sup' + (services.indexOf(orderedServices[k]) + 1), 'run') };
     }
-  } else if (!isYoteiTabActive() && services.some(needsSupport)) {
-    // タブが無い＝サービス未登録の画面等（計画予定表タブ上でないとき）。旧フラット方式は誤入力のもとなので入力しない
+  } else if (services.some(needsSupport)) {
+    // タブが無い＝サービス未登録の画面等。旧フラット方式は誤入力のもとなので入力しない
+    // （計画予定表タブは冒頭のガードで処理済みのため、ここに来るのは保険内タブのみ）
     skipped.push('援助内容: サービスタブが見つからないためスキップしました（サービス登録後に再実行してください）');
   }
 
   // ⑥ 備考（【計画予定表】タブの form:planningCalendarRemarks）
   // 保険内の援助内容が全て済んだあとに、計画予定表タブへ切り替えて備考を入力する。
   // 備考には「サービス内容欄に書けない注意事項」＋「移動支援(保険外)の曜日・時間・支援内容」を入れる。
+  // 実際の入力は冒頭の計画予定表タブ用ブロックが行う（ここは切替だけ）。入力済みかは
+  // このタブから見えないため、マーカー（getRemarksDone）で二重切替＝無限ループを防ぐ。
   const remarks = String(basic.remarks || '').trim();
-  if (remarks) {
-    if (!isYoteiTabActive()) {
-      // まだ計画予定表タブでない → 切替（未保存の変更が無いので移動確認は出ない）
-      const yoteiTab = findPlanTabLink('計画予定表');
-      if (yoteiTab) return { phase: 'switchTab', tabEl: yoteiTab, label: '計画予定表', skipped };
-      // タブが見つからなければ備考はスキップ（手動で入力）
-      skipped.push('備考: 計画予定表タブが見つからないためスキップ（手動で入力してください）');
-    } else {
-      const ta = document.querySelector(REMARKS_SEL);
-      if (ta && String(ta.value).trim() !== remarks) {
-        await setTextPersist(REMARKS_SEL, remarks);
-        // 説明日も入れてから停止（説明日欄はタブに関わらずメイン画面にある）
-        await setWarekiDate(S.deliveryDate, basic.explainDate);
-        return { phase: 'remarkFilled', skipped };
-      }
-      // 既に入力済み → 説明日を入れて done へ
-    }
+  if (remarks && !getRemarksDone()) {
+    const yoteiTab = findPlanTabLink('計画予定表');
+    if (yoteiTab) return { phase: 'switchTab', tabEl: yoteiTab, label: '計画予定表', skipped, steps: patchStep(steps, 'remarks', 'run') };
+    // タブが見つからなければ備考はスキップ（手動で入力）
+    skipped.push('備考: 計画予定表タブが見つからないためスキップ（手動で入力してください）');
   }
 
   // 説明日（作成状態・最終登録は人間）
   await setWarekiDate(S.deliveryDate, basic.explainDate);
-  return { phase: 'done', count: services.length, skipped };
+  patchStep(steps, 'footer', 'done'); storeSteps(steps);
+  return { phase: 'done', count: services.length, skipped, steps };
 }
 
 // 契約支給量（form:loop:N:contractSupplyQuantity）を入力する。数値（時間/月）のみ書き込む。
@@ -1092,7 +1166,7 @@ async function fillShogaiSupportTab(S, svc, tabIdx, skipped) {
   const details = svc.supportDetails || [];
   const tag = `援助内容(サービス${tabIdx + 1})`;
   // 既にこのタブへ入力済みなら触らない（人の修正を上書きしない）。判定はsupportTabFilledに統一
-  if (details.length && supportTabFilled(S, svc)) return;
+  if (details.length && supportTabFilled(S, svc)) { setSupDisp(tabIdx + 1); return; }
   for (let r = 0; r < details.length; r++) {
     const d = details[r];
     if (!document.querySelector(S.support.time(r))) {
@@ -1126,6 +1200,7 @@ async function fillShogaiSupportTab(S, svc, tabIdx, skipped) {
     }
     for (const k of ['time', 'notes', 'hope']) await setTextPersist(S.support[k](r), '');
   }
+  setSupDisp(tabIdx + 1); // 工程リストの表示用（検証は別途supportTabFilledで行う）
 }
 
 // =============================================================
@@ -1154,7 +1229,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           if (result.phase === 'service') {
             // 保険内サービスの保存クリックでページ全体が再読み込みされ応答チャネルが切れるため、
             // 先に応答を返してから実際の「登録する」ボタンをクリックする
-            sendResponse({ ok: true, phase: 'service', svcNo: result.svcNo, remaining: result.remaining, kind: result.kind || '', skipped: result.skipped || [] });
+            sendResponse({ ok: true, phase: 'service', svcNo: result.svcNo, remaining: result.remaining, kind: result.kind || '', skipped: result.skipped || [], steps: result.steps || [] });
             // 移動支援は「登録するを押した回数」を計画書ごとに記録し、再実行時に登録済みをスキップする
             // （保険外は週間計画表(保険内タブ)に出ないためDOMで数えられない。ページ遷移前に先に記録）
             if (result.kind === '移動支援') bumpIdouDone();
@@ -1166,18 +1241,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             // 援助内容タブの切替はフォーム全体の再送信＝画面遷移になり応答チャネルが切れるため、
             // 先に応答を返してからタブをクリックする（backgroundが再読み込みを待って続行する）。
             // このタブは保存済み（未保存の変更なし）でクリックするので移動確認ダイアログは出ない。
-            sendResponse({ ok: true, phase: 'supportSwitch', next: result.next, skipped: result.skipped || [] });
+            sendResponse({ ok: true, phase: 'supportSwitch', next: result.next, skipped: result.skipped || [], steps: result.steps || [] });
             await humanSleep(); safeClick(result.tabEl);
             return;
           }
           if (result.phase === 'switchTab') {
             // 週間計画表の上部タブ切替（例: 計画予定表）。フォーム送信＝画面遷移で応答チャネルが
             // 切れるため先に応答を返してからクリックする。保存済み状態なので移動確認は出ない。
-            sendResponse({ ok: true, phase: 'switchTab', label: result.label || '', skipped: result.skipped || [] });
+            sendResponse({ ok: true, phase: 'switchTab', label: result.label || '', skipped: result.skipped || [], steps: result.steps || [] });
             await humanSleep(); safeClick(result.tabEl);
             return;
           }
-          sendResponse({ ok: true, phase: result.phase, count: result.count || 0, tabNo: result.tabNo || 0, svcNo: result.svcNo || 0, skipped: result.skipped || [], manualIdou: result.manualIdou || [], errors: result.errors || [] });
+          sendResponse({ ok: true, phase: result.phase, count: result.count || 0, tabNo: result.tabNo || 0, svcNo: result.svcNo || 0, skipped: result.skipped || [], manualIdou: result.manualIdou || [], errors: result.errors || [], steps: result.steps || [] });
           return;
         }
         case 'HAS_ADD_BUTTON': sendResponse({ ok: true, has: await hasAddServiceButton() }); return;

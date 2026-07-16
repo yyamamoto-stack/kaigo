@@ -28,16 +28,67 @@ function setProgress(percent, label) {
   labelEl.textContent = pct + "%　" + (label || "");
 }
 
+// -------------------------------------------------------------
+// 工程リスト（プラン）の表示：✓済み（取り消し線）／▶実行中／✗エラー／⚠要手動
+// content.js がDOMの実態から導出した工程配列を background 経由で受け取って描画する。
+// -------------------------------------------------------------
+function renderSteps(steps) {
+  const wrap = document.getElementById("stepsWrap");
+  const list = document.getElementById("planSteps");
+  if (!Array.isArray(steps) || !steps.length) return; // 空の通知では前回表示を消さない
+  wrap.style.display = "block";
+  list.innerHTML = "";
+  const MARK = { done: "✓ ", run: "▶ ", error: "✗ ", warn: "⚠ " };
+  for (const s of steps) {
+    const li = document.createElement("li");
+    const state = s.state || "todo";
+    li.className = "step-" + state;
+    li.textContent = (MARK[state] || "・") + (s.label || "");
+    list.appendChild(li);
+  }
+}
+
+// 実行ボタンを押した直後、backgroundの初回応答を待たずにJSONから全工程を「予定」として表示する
+function renderPreviewSteps(payload) {
+  const services = Array.isArray(payload.services) ? payload.services : [];
+  const isIdou = (s) => String(s.serviceType || "").indexOf("移動支援") >= 0 || s.insuranceType === "保険外";
+  const steps = [{ id: "basic", label: "基本情報・援助目標・契約支給量", state: "todo" }];
+  services.forEach((s, i) => {
+    if (isIdou(s)) return;
+    const n = i + 1;
+    steps.push({ id: "svc" + n, label: `サービス${n} 設定登録（保険内 ${s.startTime || ""}〜${s.endTime || ""} ${(s.provisionDays || []).join("")}）`, state: "todo" });
+    if ((s.supportDetails || []).length) {
+      steps.push({ id: "sup" + n, label: `サービス${n} 援助内容の入力（${s.supportDetails.length}行）`, state: "todo" });
+    } else {
+      steps.push({ id: "sup" + n, label: `サービス${n} 援助内容：明細なし（手動入力）`, state: "warn" });
+    }
+  });
+  services.forEach((s, i) => {
+    if (!isIdou(s)) return;
+    const n = i + 1;
+    steps.push({ id: "svc" + n, label: `サービス${n} 設定登録（移動支援・保険外 ${s.startTime || ""}〜${s.endTime || ""} ${(s.provisionDays || []).join("")}）`, state: "todo" });
+  });
+  if (String((payload.basicInfo || {}).remarks || "").trim()) {
+    steps.push({ id: "remarks", label: "【計画予定表】タブ：備考の入力", state: "todo" });
+  }
+  steps.push({ id: "footer", label: "説明日の入力（仕上げ）", state: "todo" });
+  renderSteps(steps);
+}
+
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg && msg.type === "PROGRESS") setProgress(msg.percent, msg.label);
+  if (msg && msg.type === "PROGRESS") {
+    setProgress(msg.percent, msg.label);
+    renderSteps(msg.steps);
+  }
 });
 
-// ポップアップを開き直したとき、実行中なら現在の進捗をすぐ復元表示する
+// ポップアップを開き直したとき、実行中なら現在の進捗と工程リストをすぐ復元表示する
 // （工程の合間は通知が来ないため、これが無いと開き直し直後にバーが出ない）
 chrome.storage.local.get("kaipokeProgress", (d) => {
   var p = d && d.kaipokeProgress;
-  if (p && typeof p.percent === "number" && p.percent < 100 && Date.now() - (p.ts || 0) < 10 * 60 * 1000) {
-    setProgress(p.percent, p.label + "（実行中）");
+  if (p && Date.now() - (p.ts || 0) < 60 * 60 * 1000) {
+    if (typeof p.percent === "number" && p.percent < 100) setProgress(p.percent, p.label + "（実行中）");
+    renderSteps(p.steps); // 工程リストは停止中（人が登録する待ち）でも見えたほうが分かりやすい
   }
 });
 
@@ -83,6 +134,8 @@ document.getElementById("clearBtn").addEventListener("click", () => {
   jsonInputEl.value = "";
   try { chrome.storage.local.remove(["kaipokeJsonDraft", "kaipokeProgress"]); } catch (_) {}
   document.getElementById("progressWrap").style.display = "none";
+  document.getElementById("stepsWrap").style.display = "none";
+  document.getElementById("planSteps").innerHTML = "";
   setStatus("JSONデータをクリアしました。原案作成アプリで作成したJSONを貼り付けてください。", "info");
 });
 
@@ -118,6 +171,7 @@ document.getElementById("runBtn").addEventListener("click", async () => {
   // ★ポップアップブロックの注意（サービス設定は別ウィンドウで開く）
   setStatus("自動入力を開始しました。\n※サービス設定は別ウィンドウで開きます。ポップアップがブロックされないよう許可してください。", "info");
   setProgress(0, "開始しています…");
+  renderPreviewSteps(payload); // 実行前に全工程のプランを表示（実態はcontent.jsからの通知で上書きされる）
 
   // background.js（調整役）へ開始依頼。メインタブID を渡す。
   try {

@@ -25,13 +25,25 @@
 // 【v2.11.0】計画書画面へのPOST内容を記録するwebRequest診断機能は撤去した。
 // カイポケの通信内容の記録は「解析目的の通信傍受」に読めるため、社内遵守事項に沿って行わない。
 
+// 【v2.16.0】工程リスト（プラン）：content.jsがDOMから導出した工程配列を保持し、
+// 進捗通知と一緒にポップアップUIへ送る（済み=取り消し線／実行中／エラーの見える化）。
+let lastStepsG = null;
+let lastPctG = 0;
+function updateSteps(steps) {
+  if (Array.isArray(steps) && steps.length) lastStepsG = steps;
+}
+function markRunningStepError() {
+  if (!lastStepsG) return;
+  lastStepsG.forEach((s) => { if (s.state === 'run') s.state = 'error'; });
+}
 function reportProgress(percent, label) {
   const pct = Math.max(0, Math.min(100, Math.round(percent)));
+  lastPctG = pct;
   try {
-    chrome.runtime.sendMessage({ type: 'PROGRESS', percent: pct, label }, () => void chrome.runtime.lastError);
+    chrome.runtime.sendMessage({ type: 'PROGRESS', percent: pct, label, steps: lastStepsG || [] }, () => void chrome.runtime.lastError);
   } catch (_) {}
   // ポップアップが閉じられていても、開き直した瞬間に現在の進捗を復元できるよう保存しておく
-  try { chrome.storage.local.set({ kaipokeProgress: { percent: pct, label: label || '', ts: Date.now() } }); } catch (_) {}
+  try { chrome.storage.local.set({ kaipokeProgress: { percent: pct, label: label || '', steps: lastStepsG || [], ts: Date.now() } }); } catch (_) {}
   try {
     chrome.action.setBadgeBackgroundColor({ color: '#1976d2' });
     chrome.action.setBadgeText({ text: pct >= 100 ? '✓' : String(pct) });
@@ -302,6 +314,7 @@ async function startAutofill(payload, mainTabId) {
     let message = '';
     let prevRemaining = Infinity; // 「進んでいない」検知用（保存が反映されず同じサービスを繰り返すのを防ぐ）
     let prevSupportNext = 0; // 援助内容タブが前に進んでいるかの検知用
+    lastStepsG = null; // 工程リストは実行のたびにcontent.jsの最新スナップショットで作り直す
     reportProgress(5, '計画書を入力中…');
     for (;;) {
       if (--guard < 0) throw new Error('障害計画書の処理が想定回数を超えました。ページを再読み込みして、同じJSONのままもう一度実行してください（入力済みは自動スキップされます）。');
@@ -317,6 +330,7 @@ async function startAutofill(payload, mainTabId) {
         } else throw e;
       }
       if (r.skipped && r.skipped.length) allSkipped.push(...r.skipped);
+      updateSteps(r.steps); // 工程リストを最新化（以後のreportProgressでポップアップに反映）
       if (r.phase === 'popupStuck') {
         throw new Error('サービス設定のポップアップが開いたままで、保存（登録する）が完了していません。ポップアップ内のエラー表示や未入力の必須項目（サービス内容・時間・提供曜日など）を確認し、手動で「登録する」を押してから、同じJSONでもう一度実行してください（入力済みは自動スキップされます）。\n※保存せず×で閉じた場合、そのサービスは今回の自動入力の対象から外れるため、必要ならカイポケで手動追加してください。');
       }
@@ -443,6 +457,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse(result);
       })
       .catch((err) => {
+        // 実行中だった工程を「エラー」にして工程リストを更新（どこで止まったかの見える化）
+        markRunningStepError();
+        reportProgress(lastPctG, 'エラーで停止しました');
         reportErrorBadge();
         sendResponse({ ok: false, message: err && err.message ? err.message : String(err) });
       });

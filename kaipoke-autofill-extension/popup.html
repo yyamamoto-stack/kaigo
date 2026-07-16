@@ -64,6 +64,19 @@
     .status-error { color: #c62828; }
     .status-ok { color: #2e7d32; }
     .status-info { color: #555; }
+    /* 工程リスト（プラン）：済み=取り消し線／実行中=青太字／エラー=赤 */
+    #stepsWrap { margin-top: 10px; display: none; }
+    #stepsTitle { font-size: 12px; font-weight: bold; color: #333; margin-bottom: 4px; }
+    #planSteps {
+      margin: 0; padding: 6px 8px; list-style: none;
+      background: #fafafa; border: 1px solid #e0e0e0; border-radius: 6px;
+      font-size: 12px; line-height: 1.8; max-height: 220px; overflow-y: auto;
+    }
+    .step-done { color: #999; text-decoration: line-through; }
+    .step-run { color: #1565c0; font-weight: bold; }
+    .step-error { color: #c62828; font-weight: bold; }
+    .step-warn { color: #e65100; }
+    .step-todo { color: #333; }
   </style>
 </head>
 <body>
@@ -94,6 +107,12 @@
     <div style="background:#eee; border-radius:6px; height:10px; overflow:hidden;">
       <div id="progressBar" style="background:#1976d2; height:100%; width:0%; transition:width .3s;"></div>
     </div>
+  </div>
+
+  <!-- 工程リスト（プラン）：実行前に全工程を表示し、済んだ工程から取り消し線が引かれる -->
+  <div id="stepsWrap">
+    <div id="stepsTitle">実行プラン（✓済み／▶実行中／✗エラー／⚠要手動）</div>
+    <ol id="planSteps"></ol>
   </div>
 
   <div id="status" class="status-info"></div>
