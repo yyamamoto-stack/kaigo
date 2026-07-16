@@ -317,20 +317,17 @@ jissekiTantouEl.addEventListener("input", () => {
   try { chrome.storage.local.set({ kaipokeJissekiTantou: jissekiTantouEl.value }); } catch (_) {}
 });
 
-// 対象の作業日の設定欄（日付ピッカー×2）。既定＝①今日・②昨日。
+// 対象の作業日の設定欄（日付ピッカー×2）。既定＝①今日・②は空（普段は1日分だけ）。
 // パネルを開くたびに既定へ戻す（前日の設定が残って誤った日に入れる事故を防ぐ）。
-// ②を空にすれば1日分だけ、日付を変えれば過去の作業分の消化にも使える。
+// ②は2日分まとめて処理したいときだけ入れる。日付を変えれば過去の作業分の消化にも使える。
 const jissekiDate1El = document.getElementById("jissekiDate1");
 const jissekiDate2El = document.getElementById("jissekiDate2");
 function jissekiDateInputValue(d) {
   return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
 }
 {
-  const today = new Date();
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  jissekiDate1El.value = jissekiDateInputValue(today);
-  jissekiDate2El.value = jissekiDateInputValue(yesterday);
+  jissekiDate1El.value = jissekiDateInputValue(new Date()); // 今日
+  jissekiDate2El.value = ""; // 空＝1日分のみ
 }
 
 // 設定欄から対象の作業日リストを読む（空欄は無視・重複は除去）

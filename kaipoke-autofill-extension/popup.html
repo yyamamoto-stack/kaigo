@@ -88,6 +88,32 @@
     .jisseki-strong { font-weight: bold; color: #000; font-size: 13px; line-height: 1.7; }
     .jisseki-detail { color: #888; font-size: 11px; line-height: 1.6; margin-top: 6px; }
     .jisseki-warn { color: #e65100; font-size: 12px; font-weight: bold; margin-top: 4px; }
+    /* 実績備考セクション：カード型にまとめて計画書機能と視覚的に分離 */
+    .jisseki-card {
+      background: #f7faff;
+      border: 1px solid #c9dcf3;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-top: 14px;
+    }
+    .jisseki-card h1 { margin: 0 0 8px; }
+    .jisseki-dates { display: flex; gap: 8px; margin-bottom: 8px; }
+    .jisseki-dates label { flex: 1; font-size: 11px; color: #555; }
+    .jisseki-dates input[type="date"] {
+      width: 100%; box-sizing: border-box; padding: 6px 4px; margin-top: 2px;
+      border: 1px solid #bbb; border-radius: 6px; font-size: 13px;
+    }
+    #jissekiPreview {
+      font-size: 12px; font-weight: bold; color: #000;
+      background: #fff; border: 1px dashed #9db9dd; border-radius: 6px;
+      padding: 6px 8px; margin-bottom: 8px; white-space: pre-wrap; line-height: 1.7;
+    }
+    .jisseki-card details { margin-top: 8px; }
+    .jisseki-card summary {
+      cursor: pointer; font-size: 11px; color: #666; user-select: none;
+    }
+    .jisseki-card details .note { margin: 6px 0 0; }
+    #jissekiTantou { height: 14vh; min-height: 70px; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -132,35 +158,43 @@
        実績の備考へ サ責確認コメントを一括追記（介護保険・障害 共通）
        ①スキャン＝読み取りのみで件数を確認 → ②追記 の二段階（フェイルセーフ）
        ============================================================ -->
-  <hr style="margin:16px 0 12px; border:none; border-top:1px solid #ddd;">
-  <h1>実績の備考へ サ責コメント追記</h1>
-  <div class="note">
-    <strong>月間シフト割当一覧</strong>を開いて実行（介護保険・障害 共通）。
-    対象は<strong>下の作業日の分でコメントが入っている行のみ</strong>。それ以外には触りません。<br>
-    ⚠️ 追記後、ポップアップの<strong>「登録する」は必ずご自身で</strong>押してください。
-  </div>
-  <!-- 対象の作業日（この日の実績のコメントに「見ました」を追記する）。既定＝今日と昨日 -->
-  <div style="display:flex; gap:8px; margin-bottom:8px; font-size:12px;">
-    <label style="flex:1;">対象の作業日①
-      <input type="date" id="jissekiDate1" style="width:100%; box-sizing:border-box; padding:4px;">
-    </label>
-    <label style="flex:1;">作業日②（不要なら空に）
-      <input type="date" id="jissekiDate2" style="width:100%; box-sizing:border-box; padding:4px;">
-    </label>
-  </div>
-  <div id="jissekiPreview" style="font-size:12px; background:#f5f5f5; border:1px solid #ddd; border-radius:6px; padding:6px 8px; margin-bottom:8px; white-space:pre-wrap;">追記コメントを準備中…</div>
-  <div class="row" style="margin-top:0;">
-    <button id="jissekiScanBtn" type="button">① 備考欄を確認</button>
-    <button id="jissekiFillBtn" class="primary" type="button">② コメントを追記</button>
-  </div>
-  <div id="jissekiStatus" class="status-info" style="margin-top:8px; font-size:12px; white-space:pre-wrap;"></div>
+  <div class="jisseki-card">
+    <h1>実績備考：サ責「見ました」記録</h1>
 
-  <!-- 利用者→担当サ責の対応表（利用者売上表のAS列「担当者」に基づく。担当変更時はここを編集） -->
-  <label for="jissekiTantou" style="display:block; margin-top:10px; font-size:12px; font-weight:bold;">
-    利用者 → 担当サ責 対応表（1行に「利用者名：サ責名」。編集すると自動保存）
-  </label>
-  <textarea id="jissekiTantou" style="height:14vh; min-height:70px;"
-    placeholder="例）佐藤伸治：石原裕子"></textarea>
+    <!-- 対象の作業日（この日の実績のコメントに追記する）。既定＝①今日・②空 -->
+    <div class="jisseki-dates">
+      <label>対象の作業日
+        <input type="date" id="jissekiDate1">
+      </label>
+      <label>作業日②（普段は空のまま）
+        <input type="date" id="jissekiDate2">
+      </label>
+    </div>
+
+    <div id="jissekiPreview">追記コメントを準備中…</div>
+
+    <div class="row" style="margin-top:0;">
+      <button id="jissekiScanBtn" type="button">① 確認する</button>
+      <button id="jissekiFillBtn" class="primary" type="button">② 追記する</button>
+    </div>
+    <div id="jissekiStatus" class="status-info" style="margin-top:8px; font-size:12px; white-space:pre-wrap;"></div>
+
+    <details>
+      <summary>使い方・注意</summary>
+      <div class="note">
+        <strong>月間シフト割当一覧</strong>を開いて実行（介護保険・障害 共通）。
+        対象は<strong>上の作業日の分でコメントが入っている行のみ</strong>。それ以外には触りません。<br>
+        ⚠️ 追記後、ポップアップの<strong>「登録する」は必ずご自身で</strong>押してください。
+        従業員ごとに画面を切り替えて繰り返します（同じ日は同じ時刻が入ります）。
+      </div>
+    </details>
+
+    <!-- 利用者→担当サ責の対応表（利用者売上表のAS列「担当者」に基づく。担当変更時はここを編集） -->
+    <details>
+      <summary>利用者 → 担当サ責 対応表（初回に貼り付け・編集すると自動保存）</summary>
+      <textarea id="jissekiTantou" placeholder="例）佐藤伸治：石原裕子（1行に1人）"></textarea>
+    </details>
+  </div>
 
   <!-- 外部スクリプトは読み込まず、popup.js のみ（CSP準拠） -->
   <script src="popup.js"></script>
