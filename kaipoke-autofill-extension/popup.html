@@ -83,6 +83,11 @@
     .step-error { color: #c62828; font-weight: bold; }
     .step-warn { color: #e65100; }
     .step-todo { color: #333; }
+    /* 実績備考の結果表示：結論と対象箇所は黒太字で大きく、補足は小さくグレーで */
+    .jisseki-head { font-weight: bold; color: #000; font-size: 14px; margin: 2px 0 6px; }
+    .jisseki-strong { font-weight: bold; color: #000; font-size: 13px; line-height: 1.7; }
+    .jisseki-detail { color: #888; font-size: 11px; line-height: 1.6; margin-top: 6px; }
+    .jisseki-warn { color: #e65100; font-size: 12px; font-weight: bold; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -130,14 +135,9 @@
   <hr style="margin:16px 0 12px; border:none; border-top:1px solid #ddd;">
   <h1>実績の備考へ サ責コメント追記</h1>
   <div class="note">
-    従業員別の<strong>月間シフト割当一覧</strong>を開いてから実行してください（介護保険・障害 共通）。<br>
-    対象は<strong>下で設定した作業日の分で、従業員のコメントが入っている行のみ</strong>（既定＝今日と昨日）。
-    実績側の「備考」ボタンを自動でクリックしてポップアップを開き、
-    既存コメントの手前に「コメントを見ました」の記録
-    （<strong>【サ責】担当サ責名＋作業日の翌日＋時刻</strong>）を追記します。<br>
-    それ以外の日付・コメント未入力・追記済みの行には触りません。<br>
-    ⚠️ 追記後、ポップアップの<strong>「登録する」は必ずご自身で</strong>押してください。<br>
-    従業員ごとに画面を切り替えて繰り返してください（同じ日は同じ時刻が入ります）。
+    <strong>月間シフト割当一覧</strong>を開いて実行（介護保険・障害 共通）。
+    対象は<strong>下の作業日の分でコメントが入っている行のみ</strong>。それ以外には触りません。<br>
+    ⚠️ 追記後、ポップアップの<strong>「登録する」は必ずご自身で</strong>押してください。
   </div>
   <!-- 対象の作業日（この日の実績のコメントに「見ました」を追記する）。既定＝今日と昨日 -->
   <div style="display:flex; gap:8px; margin-bottom:8px; font-size:12px;">
