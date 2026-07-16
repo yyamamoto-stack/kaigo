@@ -176,16 +176,21 @@ document.getElementById("runBtn").addEventListener("click", async () => {
     return;
   }
 
-  // アクティブタブ（＝メイン画面）の取得
+  // 対象タブ（＝カイポケのメイン画面）の取得。
+  // サイドパネル/別ウィンドウのどちらから実行されても動くよう、全ウィンドウのアクティブタブから
+  // カイポケ（kaipoke.biz）のタブを探す（URLはhost_permissionsの範囲内のみ見える）。
   let tab;
   try {
-    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tabs = await chrome.tabs.query({ active: true });
+    const kaipokeTabs = tabs.filter((t) => t.id && /^https:\/\/[^/]*kaipoke\.biz\//.test(t.url || ""));
+    // 複数ウィンドウでカイポケを開いている場合は、最後に触ったタブを対象にする
+    kaipokeTabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+    tab = kaipokeTabs[0];
   } catch (e) {
     setStatus("アクティブタブの取得に失敗しました：" + e.message, "error");
     return;
   }
-  if (!tab || !tab.id) { setStatus("対象のタブが見つかりません。", "error"); return; }
-  if (!tab.url || !/^https:\/\/[^/]*kaipoke\.biz\//.test(tab.url)) {
+  if (!tab || !tab.id) {
     setStatus("カイポケ（kaipoke.biz）の計画書画面を開いた状態で実行してください。", "error");
     return;
   }

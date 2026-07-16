@@ -25,6 +25,24 @@
 // 【v2.11.0】計画書画面へのPOST内容を記録するwebRequest診断機能は撤去した。
 // カイポケの通信内容の記録は「解析目的の通信傍受」に読めるため、社内遵守事項に沿って行わない。
 
+// -------------------------------------------------------------
+// 【v2.17.0】UIをサイドパネル化：ツールバーのアイコンをクリックするとサイドパネルが開く。
+// 通常のポップアップと違い、ページをクリックしても閉じずに常に表示され続ける。
+// 幅は境界のドラッグで調整可能・高さはブラウザいっぱい（縦長）。
+// サイドパネル非対応の古いChromeでは、代わりに別ウィンドウでUIを開く。
+// -------------------------------------------------------------
+try {
+  if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  }
+} catch (_) {}
+chrome.action.onClicked.addListener(() => {
+  // sidePanelが使える環境ではopenPanelOnActionClickが優先され、ここは呼ばれない
+  if (!chrome.sidePanel) {
+    chrome.windows.create({ url: chrome.runtime.getURL('popup.html'), type: 'popup', width: 460, height: 900 });
+  }
+});
+
 // 【v2.16.0】工程リスト（プラン）：content.jsがDOMから導出した工程配列を保持し、
 // 進捗通知と一緒にポップアップUIへ送る（済み=取り消し線／実行中／エラーの見える化）。
 let lastStepsG = null;

@@ -8,7 +8,9 @@
     /* 拡張機能ポップアップの最小限のスタイル（外部CSSは読み込まない） */
     body {
       font-family: "Hiragino Sans", "Meiryo", sans-serif;
-      width: 380px;
+      /* サイドパネル表示：幅はパネル幅に追従（境界ドラッグで調整可）・高さは画面いっぱい */
+      width: auto;
+      min-width: 300px;
       margin: 0;
       padding: 12px;
       font-size: 13px;
@@ -29,7 +31,8 @@
     }
     textarea {
       width: 100%;
-      height: 220px;
+      height: 20vh; /* 画面の2割。下辺ドラッグで自由に伸縮可能 */
+      min-height: 90px;
       box-sizing: border-box;
       font-family: "SFMono-Regular", Consolas, monospace;
       font-size: 12px;
@@ -71,7 +74,9 @@
     #planSteps {
       margin: 0; padding: 6px 8px; list-style: none;
       background: #fafafa; border: 1px solid #e0e0e0; border-radius: 6px;
-      font-size: 12px; line-height: 1.8; max-height: 220px; overflow-y: auto;
+      font-size: 12px; line-height: 1.8;
+      /* 縦長のサイドパネルでは全工程をスクロールなしで見せる（収まらない場合のみスクロール） */
+      max-height: 45vh; overflow-y: auto;
     }
     .step-done { color: #999; text-decoration: line-through; }
     .step-run { color: #1565c0; font-weight: bold; }
