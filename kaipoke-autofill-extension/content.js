@@ -768,6 +768,13 @@ const idouCounterKey = () => 'kaipokeIdouDone:' + getPlanId();
 function getIdouDone() { try { return parseInt(sessionStorage.getItem(idouCounterKey()) || '0', 10) || 0; } catch (_) { return 0; } }
 function bumpIdouDone() { try { sessionStorage.setItem(idouCounterKey(), String(getIdouDone() + 1)); } catch (_) {} }
 
+// 援助内容の入力をDOMで確認できた保険内サービス数（計画書ごと・タブ単位）。
+// 入力済みかどうかは「表示中のタブ」のDOMでしか確認できないため、一度確認できた数を
+// 記録しておき、保険外サービスの連続追加のたびにタブ切替（画面遷移）で確認し直すのを避ける。
+const supportDoneKey = () => 'kaipokeSupportDone:' + getPlanId();
+function getSupportDone() { try { return parseInt(sessionStorage.getItem(supportDoneKey()) || '0', 10) || 0; } catch (_) { return 0; } }
+function setSupportDone(n) { try { sessionStorage.setItem(supportDoneKey(), String(n)); } catch (_) {} }
+
 // 週間計画表の行テキストと照合して、このサービスが入力済みかを判定（backgroundの判定と同じロジック）
 function svcAlreadyEntered(existingRows, svc) {
   const st = String(svc.startTime || ''), et = String(svc.endTime || '');
@@ -851,7 +858,38 @@ async function runShogai(profile, payload) {
     }
   }
 
-  // ③ 未保存サービスがあれば「1件だけ」入力する（保存クリックは呼び出し側＝応答後）
+  // ③ 【新運用 2026/07/16 ユーザー指示】保険内サービスは
+  //   「①新規追加でサービス設定を登録 → ②そのサービスの援助内容を入力 → ③人が計画書の
+  //    『登録する』を押す」のサイクルで1件ずつ進める。
+  //   そのため、次のサービスを追加する前に、直前に登録した保険内サービスの援助内容が
+  //   未入力ならまず援助内容を入力して停止する。
+  //   保険外（移動支援）は援助内容が無いため、このゲートには掛からず連続で追加する。
+  const needsSupport = (svc) => svc && !isIdouSvc(svc) && (svc.supportDetails || []).length > 0;
+  const tabs = [...document.querySelectorAll('#idTabService li')];
+  const activeIdx = tabs.length ? Math.max(0, tabs.findIndex((li) => String(li.className || '').indexOf('tab-on') >= 0)) : -1;
+  const registeredCount = nonIdou.length - pending.length; // 週間計画表に載っている保険内サービス数
+  if ((pending.length || idouPending.length) && registeredCount > 0) {
+    const lastIdx = registeredCount - 1; // 直前に登録した保険内サービス（＝援助内容タブの位置）
+    const lastSvc = nonIdou[lastIdx];
+    if (needsSupport(lastSvc) && getSupportDone() < registeredCount) {
+      if (tabs.length <= lastIdx) {
+        // 保存直後で援助内容の「サービスN」タブがまだ画面に出ていない
+        // → 人が計画書の「登録する」を押してから再実行してもらう（フェイルセーフ）
+        return { phase: 'tabMissing', svcNo: lastIdx + 1, skipped };
+      }
+      if (activeIdx !== lastIdx) {
+        const a = tabs[lastIdx].querySelector('a') || tabs[lastIdx];
+        return { phase: 'supportSwitch', tabEl: a, next: lastIdx + 1, skipped };
+      }
+      if (!supportTabFilled(S, lastSvc)) {
+        await fillShogaiSupportTab(S, lastSvc, lastIdx, skipped);
+        return { phase: 'supportFilled', tabNo: lastIdx + 1, skipped };
+      }
+      setSupportDone(registeredCount); // 入力済みをDOMで確認できたので、以後この確認は省略
+    }
+  }
+
+  // ④ 未保存サービスがあれば「1件だけ」入力する（保存クリックは呼び出し側＝応答後）
   // 【障害ポップアップの運用ルール 2026/07/14】
   //   保険内: サービス種類=居宅介護/重度訪問介護
   //     居宅介護    : サービス区分=AI解析結果(serviceCategory)
@@ -922,22 +960,20 @@ async function runShogai(profile, payload) {
     return { phase: 'service', registEl: regist, svcNo, remaining: totalRemainingAfter, skipped, isIdou, kind: isIdou ? '移動支援' : '保険内' };
   }
 
-  // ④ 全サービス保存済み → 援助内容（サービスNタブごと）→ 説明日
+  // ⑤ 全サービス登録済み → 残っている援助内容（サービスNタブごと）→ 備考 → 説明日
+  // 新運用では保険内の援助内容は③のゲートでサービス登録直後に入力済みのため、ここは
+  // 「取りこぼしの回収パス」（古い計画書の続きから再開した場合など）として残している。
   // 【v2.11.0】障害の援助内容は「サービスN」タブ式（実HTML: div#idTabService）。
   // タブ切替（oamSubmitFormのフル送信）だけでは前タブの入力が保存されず消えるため、
   // 【1タブ入力するごとに人が「登録する」で保存する】運用にする（ユーザー指示 7/15）。
   //   ・表示中タブが未入力 → そのタブを入力して停止（supportFilled）＝人が「登録する」→再実行
   //   ・表示中タブが入力済み → 次の（明細のある）タブへ切替（supportSwitch）。保存済みで
   //     未保存の変更が無いので、タブ送信リンクを押しても移動確認ダイアログは出ない。
-  //   ・後続タブが全て入力済み → 説明日を入れて done
+  //   ・後続タブが全て入力済み → 備考・説明日へ
   // タブk = orderedServices[k]（保険内→移動支援の登録順）。
   // 【運用ルール 2026/07/16】保険外（移動支援）は援助内容を入力しない（ユーザー指示）。
   //   → 保険外サービスのタブは needsSupport=false としてスキップする。
-  const needsSupport = (svc) => svc && !isIdouSvc(svc) && (svc.supportDetails || []).length > 0;
-  const tabs = [...document.querySelectorAll('#idTabService li')];
-
   if (tabs.length) {
-    const activeIdx = Math.max(0, tabs.findIndex((li) => String(li.className || '').indexOf('tab-on') >= 0));
     const cur = orderedServices[activeIdx];
     // 表示中タブが未入力なら、入力して停止（人が「登録する」で保存）
     if (needsSupport(cur) && !supportTabFilled(S, cur)) {
@@ -955,7 +991,7 @@ async function runShogai(profile, payload) {
     skipped.push('援助内容: サービスタブが見つからないためスキップしました（サービス登録後に再実行してください）');
   }
 
-  // ⑤ 備考（【計画予定表】タブの form:planningCalendarRemarks）
+  // ⑥ 備考（【計画予定表】タブの form:planningCalendarRemarks）
   // 保険内の援助内容が全て済んだあとに、計画予定表タブへ切り替えて備考を入力する。
   // 備考には「サービス内容欄に書けない注意事項」＋「移動支援(保険外)の曜日・時間・支援内容」を入れる。
   const remarks = String(basic.remarks || '').trim();
@@ -1124,7 +1160,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             await humanSleep(); safeClick(result.tabEl);
             return;
           }
-          sendResponse({ ok: true, phase: result.phase, count: result.count || 0, tabNo: result.tabNo || 0, skipped: result.skipped || [], manualIdou: result.manualIdou || [], errors: result.errors || [] });
+          sendResponse({ ok: true, phase: result.phase, count: result.count || 0, tabNo: result.tabNo || 0, svcNo: result.svcNo || 0, skipped: result.skipped || [], manualIdou: result.manualIdou || [], errors: result.errors || [] });
           return;
         }
         case 'HAS_ADD_BUTTON': sendResponse({ ok: true, has: await hasAddServiceButton() }); return;

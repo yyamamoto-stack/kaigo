@@ -298,7 +298,7 @@ async function startAutofill(payload, mainTabId) {
     // RUN_ALL（1フェーズずつ進む）を繰り返し呼び、再読み込みをまたいで自動継続する。
     const total = (payload.services || []).length;
     const allSkipped = [];
-    let guard = total * 2 + 6; // 想定外ループの安全弁（基本情報＋サービス件数＋援助内容タブ数＋仕上げ＋余裕）
+    let guard = total * 3 + 8; // 想定外ループの安全弁（サービス1件あたり 登録＋タブ切替＋援助内容 の最大3手＋仕上げ＋余裕）
     let message = '';
     let prevRemaining = Infinity; // 「進んでいない」検知用（保存が反映されず同じサービスを繰り返すのを防ぐ）
     let prevSupportNext = 0; // 援助内容タブが前に進んでいるかの検知用
@@ -338,8 +338,8 @@ async function startAutofill(payload, mainTabId) {
         break;
       }
       if (r.phase === 'supportFilled') {
-        // 援助内容タブを1枚入力して停止（人が「登録する」で保存してから再実行）。
-        message = `サービス${r.tabNo}の援助内容を入力しました。ここで一旦停止します。\n\n【次の手順】\n① 内容を確認して、ご自身で「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ 次のサービスの援助内容に進みます（入力済みは自動でスキップ）。\n\n※タブを切り替えるだけでは前のタブの入力が保存されないため、1サービスごとに「登録する」を押す運用にしています。`;
+        // 援助内容を1サービス分入力して停止（人が計画書の「登録する」で保存してから再実行）。
+        message = `サービス${r.tabNo}の援助内容を入力しました。ここで一旦停止します。\n\n【次の手順】\n① 内容を確認して、ご自身で計画書の「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ 次のサービスの追加に進みます（登録済みは自動でスキップ）。\n\n※サービス設定＋援助内容を1サービス分入れるごとに「登録する」を押す運用です。`;
         break;
       }
       if (r.phase === 'supportSwitch') {
@@ -354,15 +354,33 @@ async function startAutofill(payload, mainTabId) {
         continue;
       }
       if (r.phase === 'service') {
-        // 【運用ルール統一 2026/07/16】保険内・保険外どちらも、サービス設定を1件保存したら
-        // 一旦停止し、人が計画書の「登録する」を押してから再実行する（サービス1件ごとに手動登録）。
+        // 【新運用 2026/07/16 ユーザー指示】サービス設定を保存しても、ここでは停止しない。
+        //   保険内 : 続けて同じサービスの援助内容を入力してから停止する
+        //            （supportFilledで停止 → 人が計画書の「登録する」→ 再実行で次のサービスへ）
+        //   保険外（移動支援）: 援助内容が無いため、連続で「新規追加する」から次のサービスを
+        //            追加する。最後の1件を登録し終えたら停止して人が計画書の「登録する」を押す。
         const done = total - (r.remaining || 0);
         const kindLabel = r.kind === '移動支援' ? '移動支援（保険外）' : '保険内サービス';
         reportProgress(5 + (done / Math.max(1, total)) * 80, `${kindLabel} サービス${r.svcNo}を登録しました。画面の更新を待っています…`);
-        await new Promise((res) => setTimeout(res, 6000)); // content側のポップアップ「登録する」クリック完了を待つ
-        const remainMsg = (typeof r.remaining === 'number' && r.remaining > 0)
-          ? `\n（残りサービス ${r.remaining}件）` : '';
-        message = `${kindLabel} サービス${r.svcNo}を登録しました。ここで一旦停止します。${remainMsg}\n\n【次の手順】\n① 内容を確認して、ご自身で計画書の「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ 次のサービスに進みます（登録済みは自動でスキップ）。\n\n※サービスは1件ごとに「登録する」を押す運用に統一しています（保険内・保険外とも）。`;
+        await new Promise((res) => setTimeout(res, 6000)); // content側のポップアップ「登録する」クリック＋画面再読み込みを待つ
+        // フェイルセーフ：保存が反映されず残り件数が減らないまま繰り返すのを防ぐ
+        if (typeof r.remaining === 'number') {
+          if (r.remaining >= prevRemaining) {
+            throw new Error(`サービスの追加が進んでいません（残り${r.remaining}件のまま）。保存が反映されていない可能性があります。ページを再読み込みし、【保険外】タブも含めて登録状況を確認してから、同じJSONでもう一度実行してください（入力済みは自動スキップされます）。`);
+          }
+          prevRemaining = r.remaining;
+        }
+        if (r.kind === '移動支援' && (r.remaining || 0) <= 0) {
+          message = `最後のサービス（移動支援・保険外）を登録しました。ここで一旦停止します。\n\n【次の手順】\n① 内容を確認して、ご自身で計画書の「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ 備考（計画予定表タブ）・説明日の入力に進みます。`;
+          break;
+        }
+        await waitForContentReady(mainTabId);
+        continue;
+      }
+      if (r.phase === 'tabMissing') {
+        // サービス設定は保存できたが、援助内容の「サービスN」タブがまだ画面に出ていない
+        // （計画書の「登録する」で反映されるケース）。人に登録を頼んで停止する。
+        message = `サービス${r.svcNo}を登録しましたが、援助内容の「サービス${r.svcNo}」タブがまだ画面に表示されていません。\n\n【次の手順】\n① ご自身で計画書の「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ サービス${r.svcNo}の援助内容の入力から続きます。`;
         break;
       }
       // done: 保険内＋移動支援（保険外）のサービス・援助内容・説明日まで完了
