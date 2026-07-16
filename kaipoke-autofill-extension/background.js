@@ -388,7 +388,8 @@ async function startAutofill(payload, mainTabId) {
       break;
     }
     if (allSkipped.length) {
-      message += '\n\n⚠ 自動選択できなかった項目があります。カイポケの画面で手動選択・確認してください：\n・' + allSkipped.join('\n・');
+      // ループで同じ警告が繰り返し積まれることがあるため、表示は重複を除いてまとめる
+      message += '\n\n⚠ 自動選択できなかった項目があります。カイポケの画面で手動選択・確認してください：\n・' + [...new Set(allSkipped)].join('\n・');
     }
     return { ok: true, message: message + MANUAL_NOTE };
   }

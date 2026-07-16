@@ -868,10 +868,20 @@ async function runShogai(profile, payload) {
   const tabs = [...document.querySelectorAll('#idTabService li')];
   const activeIdx = tabs.length ? Math.max(0, tabs.findIndex((li) => String(li.className || '').indexOf('tab-on') >= 0)) : -1;
   const registeredCount = nonIdou.length - pending.length; // 週間計画表に載っている保険内サービス数
+  // 【診断ログ v2.15.1】援助内容が入らない等の調査用（F12コンソールで確認できる）
+  console.log('[kaipoke-autofill] 登録済(保険内):', registeredCount, '/', nonIdou.length,
+    '援助内容タブ数:', tabs.length, '表示中タブ:', activeIdx + 1, '援助内容確認済:', getSupportDone(),
+    '明細件数:', services.map((s, i) => `サービス${i + 1}=${(s.supportDetails || []).length}件${isIdouSvc(s) ? '(保険外)' : ''}`).join(' / '));
+  // 前回実行の残骸などでカウンタが実態より大きい場合はリセットして確認し直す（サービス削除後の再実行対策）
+  if (getSupportDone() > registeredCount) setSupportDone(0);
   if ((pending.length || idouPending.length) && registeredCount > 0) {
     const lastIdx = registeredCount - 1; // 直前に登録した保険内サービス（＝援助内容タブの位置）
     const lastSvc = nonIdou[lastIdx];
-    if (needsSupport(lastSvc) && getSupportDone() < registeredCount) {
+    if (!needsSupport(lastSvc)) {
+      // 保険内なのに援助内容の明細がJSONに無い＝AI原案が未生成のケース。
+      // 黙って次へ進むと「入力されなかった」ように見えるため、完了メッセージで必ず知らせる。
+      skipped.push(`サービス${services.indexOf(lastSvc) + 1}: 援助内容の明細（supportDetails）がJSONにありません。原案画面で再生成するか、カイポケで手動入力してください`);
+    } else if (getSupportDone() < registeredCount) {
       if (tabs.length <= lastIdx) {
         // 保存直後で援助内容の「サービスN」タブがまだ画面に出ていない
         // → 人が計画書の「登録する」を押してから再実行してもらう（フェイルセーフ）
@@ -1033,16 +1043,30 @@ async function fillContractQuantities(S, services, skipped) {
   }
 }
 
-// 表示中の援助内容タブが、そのサービスの明細で既に埋まっているか（所要時間・本人家族欄で判定）
+// 表示中の援助内容タブが、そのサービスの明細で既に埋まっているか。
+// 【v2.15.1】判定を強化：所要時間・本人家族欄に加えて留意事項も照合し、テキスト欄の無い明細
+// （区分・項目だけの行）はselectに値が入っているかで判定する。旧判定はテキスト欄が空の明細を
+// 「入力済み」と誤判定し、空のタブをスキップして次へ進む取りこぼしの原因になっていた。
 function supportTabFilled(S, svc) {
   const details = svc.supportDetails || [];
   if (!details.length) return true;
   return details.every((d, r) => {
+    const hasData = !!(d.category || d.item || d.requiredTime || d.notes || d.content);
     const t = document.querySelector(S.support.time(r));
+    if (hasData && !t) return false; // 明細があるのに入力行自体が無い＝未入力
+    const n = document.querySelector(S.support.notes(r));
     const h = document.querySelector(S.support.hope(r));
     const timeOk = !d.requiredTime || (t && String(t.value).trim() === String(d.requiredTime).trim());
+    const notesOk = !d.notes || (n && String(n.value).trim() === String(d.notes).trim());
     const hopeOk = !d.content || (h && String(h.value).trim() === String(d.content).trim());
-    return timeOk && hopeOk;
+    // テキスト3欄がすべて空の明細は、区分/項目のselectに値が入っているかで入力済みを判定する
+    let selOk = true;
+    if (!d.requiredTime && !d.notes && !d.content && (d.category || d.item)) {
+      const dv = document.querySelector(S.support.division(r));
+      const iv = document.querySelector(S.support.item(r));
+      selOk = (!d.category || !!(dv && dv.value)) && (!d.item || !!(iv && iv.value));
+    }
+    return timeOk && notesOk && hopeOk && selOk;
   });
 }
 
@@ -1067,15 +1091,8 @@ async function setTextPersist(selector, value) {
 async function fillShogaiSupportTab(S, svc, tabIdx, skipped) {
   const details = svc.supportDetails || [];
   const tag = `援助内容(サービス${tabIdx + 1})`;
-  // 既にこのタブへ入力済みなら触らない（人の修正を上書きしない）
-  const already = details.length && details.every((d, r) => {
-    const t = document.querySelector(S.support.time(r));
-    const h = document.querySelector(S.support.hope(r));
-    const timeOk = !d.requiredTime || (t && String(t.value).trim() === String(d.requiredTime).trim());
-    const hopeOk = !d.content || (h && String(h.value).trim() === String(d.content).trim());
-    return timeOk && hopeOk;
-  });
-  if (already) return;
+  // 既にこのタブへ入力済みなら触らない（人の修正を上書きしない）。判定はsupportTabFilledに統一
+  if (details.length && supportTabFilled(S, svc)) return;
   for (let r = 0; r < details.length; r++) {
     const d = details[r];
     if (!document.querySelector(S.support.time(r))) {
