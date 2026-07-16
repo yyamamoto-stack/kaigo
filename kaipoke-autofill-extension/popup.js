@@ -275,8 +275,40 @@ jissekiTantouEl.addEventListener("input", () => {
   try { chrome.storage.local.set({ kaipokeJissekiTantou: jissekiTantouEl.value }); } catch (_) {}
 });
 
-// 対象日（今日と昨日の作業分）と、それぞれのスタンプ（作業日の翌日＋日付ごとの固定ランダム時刻）を組み立てる
+// 対象の作業日の設定欄（日付ピッカー×2）。既定＝①今日・②昨日。
+// パネルを開くたびに既定へ戻す（前日の設定が残って誤った日に入れる事故を防ぐ）。
+// ②を空にすれば1日分だけ、日付を変えれば過去の作業分の消化にも使える。
+const jissekiDate1El = document.getElementById("jissekiDate1");
+const jissekiDate2El = document.getElementById("jissekiDate2");
+function jissekiDateInputValue(d) {
+  return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
+}
+{
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  jissekiDate1El.value = jissekiDateInputValue(today);
+  jissekiDate2El.value = jissekiDateInputValue(yesterday);
+}
+
+// 設定欄から対象の作業日リストを読む（空欄は無視・重複は除去）
+function jissekiSelectedWorkDates() {
+  const dates = [];
+  const seen = new Set();
+  [jissekiDate1El.value, jissekiDate2El.value].forEach((v) => {
+    if (!v || seen.has(v)) return;
+    const d = new Date(v + "T00:00:00");
+    if (isNaN(d.getTime())) return;
+    seen.add(v);
+    dates.push(d);
+  });
+  return dates;
+}
+
+// 対象日と、それぞれのスタンプ（作業日の翌日＋日付ごとの固定ランダム時刻）を組み立てる
 async function jissekiBuildStamp() {
+  const workDates = jissekiSelectedWorkDates();
+  if (!workDates.length) throw new Error("対象の作業日が設定されていません。日付欄①を入力してください。");
   const data = await chrome.storage.local.get("kaipokeJissekiTimes");
   const times = (data && data.kaipokeJissekiTimes) || {};
   let changed = false;
@@ -298,10 +330,7 @@ async function jissekiBuildStamp() {
       time,
     };
   };
-  const today = new Date();
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  const targets = [mkTarget(yesterday), mkTarget(today)];
+  const targets = workDates.map(mkTarget);
   if (changed) {
     // 60日より古い日付の記録は掃除してから保存
     const limit = Date.now() - 60 * 24 * 60 * 60 * 1000;
@@ -314,7 +343,7 @@ async function jissekiBuildStamp() {
   return { targets, mapping };
 }
 
-// パネルを開いた時点で追記コメントのプレビューを表示（時刻もこの時点で確定・保存される）
+// 追記コメントのプレビューを表示（時刻もこの時点で確定・保存される）。日付欄の変更で更新
 async function jissekiRenderPreview() {
   try {
     const s = await jissekiBuildStamp();
@@ -328,6 +357,8 @@ async function jissekiRenderPreview() {
   }
 }
 jissekiRenderPreview();
+jissekiDate1El.addEventListener("change", jissekiRenderPreview);
+jissekiDate2El.addEventListener("change", jissekiRenderPreview);
 
 // content.js へコマンドを送る（実績備考用）
 async function jissekiSend(cmd, extra = {}) {

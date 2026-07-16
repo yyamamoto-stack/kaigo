@@ -131,13 +131,22 @@
   <h1>実績の備考へ サ責コメント追記</h1>
   <div class="note">
     従業員別の<strong>月間シフト割当一覧</strong>を開いてから実行してください（介護保険・障害 共通）。<br>
-    対象は<strong>今日と昨日の作業分で、従業員のコメントが入っている行のみ</strong>。
+    対象は<strong>下で設定した作業日の分で、従業員のコメントが入っている行のみ</strong>（既定＝今日と昨日）。
     実績側の「備考」ボタンを自動でクリックしてポップアップを開き、
     既存コメントの手前に「コメントを見ました」の記録
     （<strong>【サ責】担当サ責名＋作業日の翌日＋時刻</strong>）を追記します。<br>
     それ以外の日付・コメント未入力・追記済みの行には触りません。<br>
     ⚠️ 追記後、ポップアップの<strong>「登録する」は必ずご自身で</strong>押してください。<br>
     従業員ごとに画面を切り替えて繰り返してください（同じ日は同じ時刻が入ります）。
+  </div>
+  <!-- 対象の作業日（この日の実績のコメントに「見ました」を追記する）。既定＝今日と昨日 -->
+  <div style="display:flex; gap:8px; margin-bottom:8px; font-size:12px;">
+    <label style="flex:1;">対象の作業日①
+      <input type="date" id="jissekiDate1" style="width:100%; box-sizing:border-box; padding:4px;">
+    </label>
+    <label style="flex:1;">作業日②（不要なら空に）
+      <input type="date" id="jissekiDate2" style="width:100%; box-sizing:border-box; padding:4px;">
+    </label>
   </div>
   <div id="jissekiPreview" style="font-size:12px; background:#f5f5f5; border:1px solid #ddd; border-radius:6px; padding:6px 8px; margin-bottom:8px; white-space:pre-wrap;">追記コメントを準備中…</div>
   <div class="row" style="margin-top:0;">
