@@ -813,7 +813,7 @@ function buildPlanSteps(S, services, nonIdou, idouSvcs, pending, idouDone, basic
   if (String((basic || {}).remarks || '').trim()) {
     steps.push({ id: 'remarks', label: '【計画予定表】タブ：備考の入力', state: getRemarksDone() ? 'done' : 'todo' });
   }
-  steps.push({ id: 'footer', label: '説明日の入力（仕上げ）', state: 'todo' });
+  // ※障害計画書に「説明日」欄は無い（ユーザー確認 2026/07/16）ため仕上げ工程は置かない
   return steps;
 }
 
@@ -863,7 +863,9 @@ async function runShogai(profile, payload) {
   // → 計画予定表タブでは備考・説明日だけを処理し、それ以外は【保険内】タブへ戻ってから行う。
   if (isYoteiTabActive()) {
     const steps2 = loadSteps();
-    const remarks2 = String(basic.remarks || '').trim();
+    // カイポケの備考欄は波ダッシュ「〜」「～」が使用不可（VAL_0206「備考に利用できない文字が
+    // 含まれています」・2026/07/16実機確認）→「-」に置き換えてから入力する
+    const remarks2 = String(basic.remarks || '').trim().replace(/[〜～]/g, '-');
     const ta = document.querySelector(REMARKS_SEL);
     if (remarks2 && ta && String(ta.value || '').trim() !== remarks2) {
       await setTextPersist(REMARKS_SEL, remarks2);
@@ -876,9 +878,7 @@ async function runShogai(profile, payload) {
     // 備考は済み（または不要）。このタブでは他の工程の状況が分からないため【保険内】タブへ戻る
     const backTab = findPlanTabLink('保険内');
     if (backTab) return { phase: 'switchTab', tabEl: backTab, label: '保険内', skipped, steps: steps2 };
-    // 万一戻れない場合は説明日だけ入れて完了扱い（サービスの追加はこのタブでは行わない）
-    await setWarekiDate(S.deliveryDate, basic.explainDate);
-    patchStep(steps2, 'footer', 'done'); storeSteps(steps2);
+    // 万一戻れない場合は完了扱い（サービスの追加はこのタブでは行わない）
     return { phase: 'done', count: services.length, skipped, steps: steps2 };
   }
   // 【保険外】タブがアクティブな場合も登録状況を正しく判定できないため、先に【保険内】タブへ戻る
@@ -1065,7 +1065,10 @@ async function runShogai(profile, payload) {
   // タブk = orderedServices[k]（保険内→移動支援の登録順）。
   // 【運用ルール 2026/07/16】保険外（移動支援）は援助内容を入力しない（ユーザー指示）。
   //   → 保険外サービスのタブは needsSupport=false としてスキップする。
-  if (tabs.length) {
+  // 全保険内タブの入力確認が済んでいる（getSupportDone()が登録済み数に達している）場合は
+  // この回収パスを丸ごとスキップする。移動支援の完了後に毎回サービスNタブを見に行く
+  // 「保険内を触りに行く動き」（2026/07/16ユーザー指摘）を無くすため。
+  if (tabs.length && getSupportDone() < registeredCount) {
     const cur = orderedServices[activeIdx];
     // 表示中タブが未入力なら、入力して停止（人が「登録する」で保存）
     if (needsSupport(cur) && !supportTabFilled(S, cur)) {
@@ -1078,7 +1081,7 @@ async function runShogai(profile, payload) {
       const a = tabs[k].querySelector('a') || tabs[k];
       return { phase: 'supportSwitch', tabEl: a, next: k + 1, skipped, steps: patchStep(steps, 'sup' + (services.indexOf(orderedServices[k]) + 1), 'run') };
     }
-  } else if (services.some(needsSupport)) {
+  } else if (!tabs.length && services.some(needsSupport)) {
     // タブが無い＝サービス未登録の画面等。旧フラット方式は誤入力のもとなので入力しない
     // （計画予定表タブは冒頭のガードで処理済みのため、ここに来るのは保険内タブのみ）
     skipped.push('援助内容: サービスタブが見つからないためスキップしました（サービス登録後に再実行してください）');
@@ -1097,9 +1100,9 @@ async function runShogai(profile, payload) {
     skipped.push('備考: 計画予定表タブが見つからないためスキップ（手動で入力してください）');
   }
 
-  // 説明日（作成状態・最終登録は人間）
-  await setWarekiDate(S.deliveryDate, basic.explainDate);
-  patchStep(steps, 'footer', 'done'); storeSteps(steps);
+  // 障害計画書に「説明日」欄は無い（ユーザー確認 2026/07/16）。交付日は備考入力時
+  // （計画予定表タブ）にセット済みのため、ここでは何も入力せず完了（最終登録は人間）。
+  storeSteps(steps);
   return { phase: 'done', count: services.length, skipped, steps };
 }
 

@@ -71,8 +71,23 @@ function renderPreviewSteps(payload) {
   if (String((payload.basicInfo || {}).remarks || "").trim()) {
     steps.push({ id: "remarks", label: "【計画予定表】タブ：備考の入力", state: "todo" });
   }
-  steps.push({ id: "footer", label: "説明日の入力（仕上げ）", state: "todo" });
   renderSteps(steps);
+}
+
+// -------------------------------------------------------------
+// 結果メッセージの表示：完了（緑）／一時停止＝人が「登録する」して再実行（青）／エラー（赤）
+// ポップアップは画面クリックで閉じてしまい実行完了時に開いていないことが多いため、
+// backgroundが保存した結果（kaipokeLastResult）を開き直したときに必ず表示する。
+// -------------------------------------------------------------
+function showResult(ok, paused, msg) {
+  if (!ok) {
+    setStatus("停止しました：" + (msg || "不明なエラー"), "error");
+  } else if (paused) {
+    setStatus("一時停止中（続きがあります）：" + (msg || ""), "pause");
+  } else {
+    setStatus("完了しました：" + (msg || "自動入力が終了しました。") +
+      "\n※必ず目視確認のうえ、作成状態を「作成済」にしてから、ご自身で「登録する」を押してください。", "ok");
+  }
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -80,15 +95,22 @@ chrome.runtime.onMessage.addListener((msg) => {
     setProgress(msg.percent, msg.label);
     renderSteps(msg.steps);
   }
+  if (msg && msg.type === "RESULT") {
+    showResult(msg.ok, msg.paused, msg.message);
+  }
 });
 
-// ポップアップを開き直したとき、実行中なら現在の進捗と工程リストをすぐ復元表示する
-// （工程の合間は通知が来ないため、これが無いと開き直し直後にバーが出ない）
-chrome.storage.local.get("kaipokeProgress", (d) => {
+// ポップアップを開き直したとき、進捗・工程リスト・前回の結果メッセージをすぐ復元表示する
+// （工程の合間は通知が来ないため、これが無いと開き直し直後に何も見えない）
+chrome.storage.local.get(["kaipokeProgress", "kaipokeLastResult"], (d) => {
   var p = d && d.kaipokeProgress;
   if (p && Date.now() - (p.ts || 0) < 60 * 60 * 1000) {
-    if (typeof p.percent === "number" && p.percent < 100) setProgress(p.percent, p.label + "（実行中）");
+    if (typeof p.percent === "number" && p.percent < 100) setProgress(p.percent, p.label);
     renderSteps(p.steps); // 工程リストは停止中（人が登録する待ち）でも見えたほうが分かりやすい
+  }
+  var r = d && d.kaipokeLastResult;
+  if (r && Date.now() - (r.ts || 0) < 60 * 60 * 1000) {
+    showResult(r.ok, r.paused, r.message);
   }
 });
 
@@ -132,7 +154,7 @@ function validatePayload(data) {
 document.getElementById("clearBtn").addEventListener("click", () => {
   if (jsonInputEl.value.trim() && !confirm("入力中のJSONデータを消去します。よろしいですか？")) return;
   jsonInputEl.value = "";
-  try { chrome.storage.local.remove(["kaipokeJsonDraft", "kaipokeProgress"]); } catch (_) {}
+  try { chrome.storage.local.remove(["kaipokeJsonDraft", "kaipokeProgress", "kaipokeLastResult"]); } catch (_) {}
   document.getElementById("progressWrap").style.display = "none";
   document.getElementById("stepsWrap").style.display = "none";
   document.getElementById("planSteps").innerHTML = "";
@@ -171,7 +193,12 @@ document.getElementById("runBtn").addEventListener("click", async () => {
   // ★ポップアップブロックの注意（サービス設定は別ウィンドウで開く）
   setStatus("自動入力を開始しました。\n※サービス設定は別ウィンドウで開きます。ポップアップがブロックされないよう許可してください。", "info");
   setProgress(0, "開始しています…");
-  renderPreviewSteps(payload); // 実行前に全工程のプランを表示（実態はcontent.jsからの通知で上書きされる）
+  try { chrome.storage.local.remove("kaipokeLastResult"); } catch (_) {} // 前回の結果表示は新しい実行でリセット
+  // 工程リストがまだ空のとき（初回実行）だけ、JSONから全工程のプランを予定表示する。
+  // 2回目以降は前回までの済み（取り消し線）を残し、content.jsからの実態通知で上書きされるのを待つ。
+  if (document.getElementById("planSteps").children.length === 0) {
+    renderPreviewSteps(payload);
+  }
 
   // background.js（調整役）へ開始依頼。メインタブID を渡す。
   try {
@@ -180,11 +207,8 @@ document.getElementById("runBtn").addEventListener("click", async () => {
       tabId: tab.id,
       payload,
     });
-    if (response && response.ok) {
-      setStatus("完了しました：" + (response.message || "自動入力が終了しました。") +
-        "\n※必ず目視確認のうえ、作成状態を「作成済」にしてから、ご自身で「登録する」を押してください。", "ok");
-    } else {
-      setStatus("停止しました：" + ((response && response.message) || "不明なエラー"), "error");
+    if (response) {
+      showResult(!!response.ok, !!response.paused, response.message);
     }
   } catch (e) {
     setStatus("拡張機能と通信できませんでした。カイポケの計画書画面で拡張機能を再読み込みしてください。\n詳細：" + e.message, "error");

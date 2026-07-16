@@ -36,6 +36,11 @@ function markRunningStepError() {
   if (!lastStepsG) return;
   lastStepsG.forEach((s) => { if (s.state === 'run') s.state = 'error'; });
 }
+function patchStepBG(id, state) {
+  if (!lastStepsG) return;
+  const s = lastStepsG.find((x) => x.id === id);
+  if (s) s.state = state;
+}
 function reportProgress(percent, label) {
   const pct = Math.max(0, Math.min(100, Math.round(percent)));
   lastPctG = pct;
@@ -314,7 +319,9 @@ async function startAutofill(payload, mainTabId) {
     let message = '';
     let prevRemaining = Infinity; // 「進んでいない」検知用（保存が反映されず同じサービスを繰り返すのを防ぐ）
     let prevSupportNext = 0; // 援助内容タブが前に進んでいるかの検知用
-    lastStepsG = null; // 工程リストは実行のたびにcontent.jsの最新スナップショットで作り直す
+    let paused = true; // done（全完了）以外の停止は「一時停止」＝人が登録して再実行する
+    // 工程リストは前回表示を残したまま、content.jsからの最新スナップショットで随時上書きする
+    // （実行ボタンを押した瞬間に進捗表示が消える問題の対策）
     reportProgress(5, '計画書を入力中…');
     for (;;) {
       if (--guard < 0) throw new Error('障害計画書の処理が想定回数を超えました。ページを再読み込みして、同じJSONのままもう一度実行してください（入力済みは自動スキップされます）。');
@@ -346,9 +353,9 @@ async function startAutofill(payload, mainTabId) {
         continue;
       }
       if (r.phase === 'remarkFilled') {
-        // 備考（計画予定表タブ）を入力して停止。人が「登録する」を押してから再実行してもらう。
+        // 備考（計画予定表タブ）を入力して停止。人が「登録する」を押せば実質完了。
         reportProgress(95, '備考を入力しました。');
-        message = '計画予定表タブの「備考」を入力しました。ここで一旦停止します。\n\n【次の手順】\n① 内容を確認して、ご自身で計画書の「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ 残りの入力（説明日など）に進み完了します。';
+        message = '計画予定表タブの「備考」と交付日を入力しました。これが最後の自動入力です。\n\n【次の手順】\n① 内容を確認して、ご自身で計画書の「登録する」を押して保存する\n→ これで下書きは完了です。目視確認のうえ、作成状態を「作成済」にして再度「登録する」を押してください。\n（もう一度「自動入力を実行」を押すと、全工程の完了チェックだけ行います）';
         break;
       }
       if (r.phase === 'supportFilled') {
@@ -384,8 +391,12 @@ async function startAutofill(payload, mainTabId) {
           }
           prevRemaining = r.remaining;
         }
+        // 登録クリックまで済んだサービスは工程リストを「済み」に更新する
+        // （最後の移動支援は直後に停止するため、これが無いと済み表示にならない）
+        patchStepBG('svc' + r.svcNo, 'done');
         if (r.kind === '移動支援' && (r.remaining || 0) <= 0) {
-          message = `最後のサービス（移動支援・保険外）を登録しました。ここで一旦停止します。\n\n【次の手順】\n① 内容を確認して、ご自身で計画書の「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ 備考（計画予定表タブ）・説明日の入力に進みます。`;
+          reportProgress(90, `サービス${r.svcNo}（移動支援）を登録しました。`);
+          message = `最後のサービス（移動支援・保険外）を登録しました。ここで一旦停止します。\n\n【次の手順】\n① 内容を確認して、ご自身で計画書の「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ 備考（計画予定表タブ）の入力に進みます。`;
           break;
         }
         await waitForContentReady(mainTabId);
@@ -397,15 +408,16 @@ async function startAutofill(payload, mainTabId) {
         message = `サービス${r.svcNo}を登録しましたが、援助内容の「サービス${r.svcNo}」タブがまだ画面に表示されていません。\n\n【次の手順】\n① ご自身で計画書の「登録する」を押して保存する\n② 保存後、同じJSONのままもう一度「自動入力を実行」を押す\n→ サービス${r.svcNo}の援助内容の入力から続きます。`;
         break;
       }
-      // done: 保険内＋移動支援（保険外）のサービス・援助内容・説明日まで完了
-      message = `サービス（保険内・移動支援）と援助内容・説明日の下書き入力が完了しました。目視確認のうえ、作成状態を「作成済」にしてご自身で「登録する」を押してください。\n\n※移動支援（保険外）は【保険外】タブで登録内容をご確認ください。`;
+      // done: 保険内＋移動支援（保険外）のサービス・援助内容・備考まで全工程完了
+      paused = false;
+      message = `サービス（保険内・移動支援）・援助内容・備考の下書き入力がすべて完了しました。目視確認のうえ、作成状態を「作成済」にしてご自身で「登録する」を押してください。\n\n※移動支援（保険外）は【保険外】タブで登録内容をご確認ください。`;
       break;
     }
     if (allSkipped.length) {
       // ループで同じ警告が繰り返し積まれることがあるため、表示は重複を除いてまとめる
       message += '\n\n⚠ 自動選択できなかった項目があります。カイポケの画面で手動選択・確認してください：\n・' + [...new Set(allSkipped)].join('\n・');
     }
-    return { ok: true, message: message + MANUAL_NOTE };
+    return { ok: true, message: message + MANUAL_NOTE, paused };
   }
   // 要介護/要支援: 別ウィンドウ調整（1回の実行で1サービスずつ）
   const isYoshien = String(modeInfo.label || '').indexOf('要支援') >= 0;
@@ -423,7 +435,7 @@ async function startAutofill(payload, mainTabId) {
   if (result.svcWarnings && result.svcWarnings.length) {
     message += '\n\n⚠ サービス設定で自動選択できなかった項目があります。カイポケの画面で該当サービスを開き、手動で選択・確認してください：\n・' + result.svcWarnings.join('\n・');
   }
-  return { ok: true, message: message + MANUAL_NOTE };
+  return { ok: true, message: message + MANUAL_NOTE, paused: !!(result.needSaveFirst || result.remaining > 0) };
 }
 
 // -------------------------------------------------------------
@@ -452,16 +464,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const mainTabId = message.tabId;
     startAutofill(message.payload, mainTabId)
       .then((result) => {
-        reportProgress(100, '完了しました');
+        // 「一時停止（人が登録して再実行）」と「全工程完了」を区別して表示する
+        if (result.paused) {
+          reportProgress(lastPctG, '一時停止中：計画書の「登録する」を押してから、もう一度「自動入力を実行」を押してください');
+        } else {
+          reportProgress(100, '完了しました');
+        }
         clearBadgeLater();
+        // ポップアップは画面クリックで閉じてしまい応答が届かないことが多いため、
+        // 結果メッセージを保存し、開き直したときに必ず表示できるようにする
+        try { chrome.storage.local.set({ kaipokeLastResult: { ok: true, paused: !!result.paused, message: result.message || '', ts: Date.now() } }); } catch (_) {}
+        try { chrome.runtime.sendMessage({ type: 'RESULT', ok: true, paused: !!result.paused, message: result.message || '' }, () => void chrome.runtime.lastError); } catch (_) {}
         sendResponse(result);
       })
       .catch((err) => {
+        const msg = err && err.message ? err.message : String(err);
         // 実行中だった工程を「エラー」にして工程リストを更新（どこで止まったかの見える化）
         markRunningStepError();
         reportProgress(lastPctG, 'エラーで停止しました');
         reportErrorBadge();
-        sendResponse({ ok: false, message: err && err.message ? err.message : String(err) });
+        try { chrome.storage.local.set({ kaipokeLastResult: { ok: false, paused: false, message: msg, ts: Date.now() } }); } catch (_) {}
+        try { chrome.runtime.sendMessage({ type: 'RESULT', ok: false, paused: false, message: msg }, () => void chrome.runtime.lastError); } catch (_) {}
+        sendResponse({ ok: false, message: msg });
       });
     return true; // 非同期応答
   }
