@@ -869,7 +869,8 @@ async function runShogai(profile, payload) {
     const ta = document.querySelector(REMARKS_SEL);
     if (remarks2 && ta && String(ta.value || '').trim() !== remarks2) {
       await setTextPersist(REMARKS_SEL, remarks2);
-      await setWarekiDate(S.deliveryDate, basic.explainDate);
+      // 交付日は実行日（今日）を入れる（ユーザー指示 2026/07/16。JSONのexplainDateは使わない）
+      await setWarekiDate(S.deliveryDate, '', { fallbackToday: true });
       markRemarksDone();
       patchStep(steps2, 'remarks', 'done'); storeSteps(steps2);
       return { phase: 'remarkFilled', skipped, steps: steps2 };
@@ -1084,6 +1085,10 @@ async function runShogai(profile, payload) {
       await fillShogaiSupportTab(S, cur, activeIdx, skipped);
       return { phase: 'supportFilled', tabNo: activeIdx + 1, skipped, steps: patchStep(steps, 'sup' + (services.indexOf(cur) + 1), 'done') };
     }
+    // 表示中タブの入力済みをDOMで確認できたので記録する。これが無いと、移動支援の無い
+    // 計画書では最後の援助内容の確認記録が残らず、備考の後の再実行でもう一度サービスNタブを
+    // 確認しに行く無駄な動きが出る（2026/07/16ユーザー指摘）
+    if (needsSupport(cur) && activeIdx + 1 > getSupportDone()) setSupportDone(activeIdx + 1);
     // 表示中タブは済み（or 明細なし・保険外）→ 次の入力が必要なタブへ切替
     for (let k = activeIdx + 1; k < Math.min(tabs.length, orderedServices.length); k++) {
       if (!needsSupport(orderedServices[k])) continue;
