@@ -1226,20 +1226,57 @@ async function fillShogaiSupportTab(S, svc, tabIdx, skipped) {
 }
 
 // =============================================================
-// 実績備考：サ責確認コメントの一括追記（v2.18.0）
-// 対象：介護保険・障害サービスの実績画面（毎日実績）。計画書とは別の独立機能。
-// 画面上の「備考」列の入力欄（textarea / text input）を探し、既存コメントの手前に
-// 「【サ責】山本禎典 R8.7.17 10:07」形式のコメントを追記する。
-//   ・JISSEKI_SCAN … 読み取りのみ（何件・どの列かをユーザーに見せる。フェイルセーフ）
-//   ・JISSEKI_FILL … 追記の実行。既に【サ責】が入っている欄はスキップ（二重追記防止）
-//   ・最終の「登録／保存」は必ず人間が押す（自動では押さない。claude.md 4章）
-// 実績画面のMEMコード・実DOMは未確認のためURL判定はせず、汎用の列検出＋二段階実行で安全を担保する。
+// 実績備考：サ責確認コメントの一括追記（v2.18.1 実DOM対応）
+// 対象：月間シフト割当一覧（従業員別・MEM097811/097812）。介護保険・障害の実績が同じ画面に並ぶ。
+// 実HTML（05オペレーション部\麻生 夏美さん　月間シフト割当一覧.html・7/16入手）で確定した構造：
+//   ・一覧の備考列（td.colum07）は span.txt-pre-wrap の表示専用。直接編集はできない
+//   ・編集は【実績】ヘッダの「備考」ボタン（form:input-additional-info-actual）→
+//     備考一括入力ポップアップ（A25_layout / formRegistCaptions）で行う
+//   ・ポップアップの入力欄= textarea formRegistCaptions:tableRemark:{N}:remark（onblurでajaxSingle確定）
+//   ・保存=「登録する」（formRegistCaptions:btnPopupRegist・popupSubmitId=1）→ これは必ず人間が押す
+//   ・一覧はページ分割あり（例 [合計：40件] 1/2ページ）→ ページごとに 実行→人が登録 を繰り返す
+// 既存の備考には他のサ責のコメント（例「【サ責】石原裕子\n2026/07/02\n11:00…」）が既に入っているため、
+// 追記済み判定は「【サ責】山本禎典＋同じ日付」の組み合わせでのみスキップする。
+//   ・JISSEKI_SCAN … 読み取りのみ（件数・内容をユーザーに見せる。フェイルセーフ）
+//   ・JISSEKI_FILL … ポップアップが閉じていれば「備考」ボタンをクリックして開き、追記する
 // =============================================================
 const JISSEKI = {
-  markerRe: /【サ責】/,                    // 追記済み判定（この文字列があれば触らない）
-  headerWords: ['備考'],                   // 備考列とみなす列見出しの文言
-  idHints: /biko|remark|memo|comment/i,    // id/name からの補助判定（見出しが取れない画面の保険）
+  sel: {
+    actualRemarkBtn: '[id="form:input-additional-info-actual"]', // 【実績】側の「備考」ボタン（予定側は…-plan）
+    popupTextareas: 'textarea[id^="formRegistCaptions:tableRemark:"]', // ポップアップの備考入力欄
+    popupRegist: '[id="formRegistCaptions:btnPopupRegist"]',     // ポップアップの「登録する」（人が押す・自動では押さない）
+    pagerInfo: '.pager-btm',                                     // ページャ（合計件数・ページ番号の表示）
+  },
+  markerRe: /【サ責】/,                    // 汎用フォールバックの追記済み判定
+  headerWords: ['備考'],                   // 汎用フォールバック：備考列とみなす列見出しの文言
+  idHints: /biko|remark|memo|comment/i,    // 汎用フォールバック：id/name からの補助判定
 };
+
+// 月間シフト割当一覧（従業員別の実績画面）かどうか
+function jissekiIsHelperMonthly() {
+  return /MEM0978\d\d/.test(location.href) ||
+    location.pathname.indexOf('/attendence/monthly/helper/') >= 0 ||
+    (document.title || '').indexOf('月間シフト割当一覧') >= 0;
+}
+
+// 備考一括入力ポップアップの入力欄（表示中のもの）
+function jissekiPopupFields() {
+  return Array.from(document.querySelectorAll(JISSEKI.sel.popupTextareas)).filter(jissekiIsWritable);
+}
+
+// ページャの表示テキスト（例「[合計：40件] 最初 前 1/ 2ページ 次 最後」）
+function jissekiPagerText() {
+  const p = document.querySelector(JISSEKI.sel.pagerInfo);
+  return p ? (p.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
+}
+
+// 追記済み判定：【サ責】山本禎典＋同じ日付が既に入っていればスキップ
+// （他のサ責のコメントが入っていても山本さんの確認コメントは追記する）
+function jissekiAlreadyDone(value, marker, dateStr) {
+  const v = String(value || '');
+  if (marker) return v.indexOf(marker) >= 0 && (!dateStr || v.indexOf(dateStr) >= 0);
+  return JISSEKI.markerRe.test(v); // markerが渡されない場合の保険
+}
 
 // 書き込んでよい欄か（表示中・編集可のテキスト欄のみ）
 function jissekiIsWritable(el) {
@@ -1289,43 +1326,99 @@ function jissekiCollectFields() {
 }
 
 // スキャン結果の要約（popupに表示する）
-function jissekiScanSummary() {
+function jissekiScanSummary(marker, dateStr) {
+  // ---- 月間シフト割当一覧（実DOM確定済みのメイン対応画面） ----
+  if (jissekiIsHelperMonthly()) {
+    const fields = jissekiPopupFields();
+    const base = { screen: 'helperMonthly', title: document.title, pager: jissekiPagerText() };
+    if (!fields.length) {
+      // ポップアップ未オープン。実績側「備考」ボタンの有無だけ確認して返す
+      return { ...base, popupOpen: false, total: 0, already: 0,
+        hasActualBtn: !!document.querySelector(JISSEKI.sel.actualRemarkBtn) };
+    }
+    let already = 0;
+    fields.forEach((el) => { if (jissekiAlreadyDone(el.value, marker, dateStr)) already++; });
+    const samples = fields.slice(0, 5).map((el) => ({
+      id: el.id, value: String(el.value || '').replace(/\n/g, '␍').slice(0, 30),
+    }));
+    return { ...base, popupOpen: true, total: fields.length, already, samples };
+  }
+  // ---- 汎用フォールバック（他の実績画面用） ----
   const fields = jissekiCollectFields();
   const groups = {};
   let already = 0;
   fields.forEach((f) => {
     groups[f.source] = (groups[f.source] || 0) + 1;
-    if (JISSEKI.markerRe.test(String(f.el.value || ''))) already++;
+    if (jissekiAlreadyDone(f.el.value, marker, dateStr)) already++;
   });
   const samples = fields.slice(0, 5).map((f) => ({
     id: f.el.id || f.el.name || '(idなし)',
-    value: String(f.el.value || '').slice(0, 30),
+    value: String(f.el.value || '').replace(/\n/g, '␍').slice(0, 30),
   }));
-  return { total: fields.length, already, groups, samples, title: document.title };
+  return { screen: 'generic', total: fields.length, already, groups, samples, title: document.title };
+}
+
+// 1つの備考欄へコメントを先頭追記する（focus→入力→blur。blurでページ本来のajaxSingleが走り確定する）
+async function jissekiPrepend(el, comment) {
+  const cur = String(el.value || '');
+  if (typeof el.focus === 'function') el.focus();
+  setNativeValue(el, comment + (cur ? '\n' + cur : ''));
+  el.dispatchEvent(new FocusEvent('blur'));
+  await humanSleep(); // コンプライアンス 1-2：各操作の間に0.5〜1.5秒
 }
 
 // コメントを各備考欄の先頭へ追記する。
-// カイポケにはonblurのajaxで1項目ずつ確定する画面があるため、入力ごとにblurを発火し、
-// 操作の間に必ず humanSleep（0.5〜1.5秒）を挟む（コンプライアンス 1-2）。
-async function jissekiFillRemarks(comment) {
+async function jissekiFillRemarks(comment, marker, dateStr) {
+  // ---- 月間シフト割当一覧（実DOM確定済みのメイン対応画面） ----
+  if (jissekiIsHelperMonthly()) {
+    let fields = jissekiPopupFields();
+    if (!fields.length) {
+      // ポップアップが閉じている→【実績】側の「備考」ボタンをクリックして開く（画面上の通常ボタン操作）
+      const btn = await waitForElement(JISSEKI.sel.actualRemarkBtn, { timeout: 8000 }).catch(() => null);
+      if (!btn) {
+        throw new Error('実績側の「備考」ボタンが見つかりませんでした。月間シフト割当一覧（従業員別の実績画面）を開いた状態で実行してください。');
+      }
+      await humanSleep();
+      safeClick(btn);
+      // ajaxで備考ポップアップ（A25_layout）が開き、入力欄が描画されるのを待つ
+      await waitForElement(JISSEKI.sel.popupTextareas, { timeout: 15000 });
+      await sleep(800);
+      fields = jissekiPopupFields();
+    }
+    if (!fields.length) {
+      throw new Error('備考ポップアップは開きましたが、入力欄が0件でした。この月・このページに実績の行が無い可能性があります。');
+    }
+    let done = 0, already = 0;
+    for (const el of fields) {
+      if (jissekiAlreadyDone(el.value, marker, dateStr)) { already++; continue; } // 同じ日付の山本コメントは二重追記しない
+      await jissekiPrepend(el, comment);
+      done++;
+    }
+    const result = { screen: 'helperMonthly', total: fields.length, done, already, needRegist: true, pager: jissekiPagerText() };
+    try { chrome.storage.local.set({ kaipokeJissekiLast: { ...result, title: document.title, ts: Date.now() } }); } catch (_) {}
+    return result; // 「登録する」（btnPopupRegist）は自動では押さない＝人が押す（claude.md 4章）
+  }
+  // ---- 汎用フォールバック（他の実績画面用） ----
   const fields = jissekiCollectFields();
   if (!fields.length) {
     throw new Error('この画面に「備考」の入力欄が見つかりませんでした。' +
-      '実績の入力画面（備考欄が編集できる状態）を開いてから実行してください。' +
+      '月間シフト割当一覧などの実績画面を開いてから実行してください。' +
       'それでも見つからない場合は、この画面を Ctrl+S でHTML保存してシステム部に解析を依頼してください。');
   }
   let done = 0, already = 0;
   for (const f of fields) {
-    const cur = String(f.el.value || '');
-    if (JISSEKI.markerRe.test(cur)) { already++; continue; } // 追記済み＝人の確認済みコメントを二重にしない
-    const sep = cur ? (f.el.tagName === 'TEXTAREA' ? '\n' : ' ') : '';
-    setNativeValue(f.el, comment + sep + cur);
-    f.el.dispatchEvent(new FocusEvent('blur'));
-    await humanSleep();
+    if (jissekiAlreadyDone(f.el.value, marker, dateStr)) { already++; continue; }
+    if (f.el.tagName === 'TEXTAREA') {
+      await jissekiPrepend(f.el, comment);
+    } else {
+      const cur = String(f.el.value || '');
+      setNativeValue(f.el, comment.replace(/\n/g, ' ') + (cur ? ' ' + cur : '')); // 1行入力欄は改行を空白に
+      f.el.dispatchEvent(new FocusEvent('blur'));
+      await humanSleep();
+    }
     done++;
   }
-  const result = { total: fields.length, done, already };
-  // サイドパネルが途中で閉じて応答が届かなくても結果を確認できるよう保存しておく
+  const result = { screen: 'generic', total: fields.length, done, already };
   try { chrome.storage.local.set({ kaipokeJissekiLast: { ...result, title: document.title, ts: Date.now() } }); } catch (_) {}
   return result;
 }
@@ -1348,12 +1441,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       // ---- 実績備考（計画書のPROFILE判定より前に処理：実績画面はPROFILE=nullのため） ----
       if (message.cmd === 'JISSEKI_SCAN') {
-        sendResponse({ ok: true, ...jissekiScanSummary() });
+        sendResponse({ ok: true, ...jissekiScanSummary(message.marker, message.dateStr) });
         return;
       }
       if (message.cmd === 'JISSEKI_FILL') {
         if (!message.comment || !String(message.comment).trim()) throw new Error('追記するコメントが空です。');
-        const r = await jissekiFillRemarks(String(message.comment));
+        const r = await jissekiFillRemarks(String(message.comment), message.marker, message.dateStr);
         sendResponse({ ok: true, ...r });
         return;
       }

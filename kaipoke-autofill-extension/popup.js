@@ -228,9 +228,13 @@ document.getElementById("runBtn").addEventListener("click", async () => {
 });
 
 // =============================================================
-// 実績の備考へ サ責確認コメントを一括追記（v2.18.0）
-// コメント形式：【サ責】山本禎典 R8.7.17 10:07
-//   ・日付＝実行日の翌日（和暦R表記）
+// 実績の備考へ サ責確認コメントを一括追記（v2.18.1 実DOM対応）
+// 対象画面：月間シフト割当一覧（従業員別）。既存コメントの手前に3行形式で追記する。
+// コメント形式（既存のサ責コメントと同じ社内慣行に合わせた表記）：
+//   【サ責】山本禎典
+//   2026/07/17
+//   10:07
+//   ・日付＝実行日の翌日
 //   ・時刻＝10:00〜10:30 のランダム。同じ日付には同じ時刻を使う（storageに日付→時刻を保存し、
 //     従業員を切り替えて何回実行しても・再実行しても同じ時刻になる）
 // 書き込み自体は content.js（JISSEKI_SCAN／JISSEKI_FILL）が行う。
@@ -248,7 +252,7 @@ async function jissekiBuildComment() {
   const d = new Date();
   d.setDate(d.getDate() + 1); // 翌日
   const dateKey = d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
-  const wareki = "R" + (d.getFullYear() - 2018) + "." + (d.getMonth() + 1) + "." + d.getDate(); // 令和元年=2019
+  const dateStr = d.getFullYear() + "/" + pad2(d.getMonth() + 1) + "/" + pad2(d.getDate()); // 既存コメントと同じ 2026/07/17 形式
   const data = await chrome.storage.local.get("kaipokeJissekiTimes");
   const times = (data && data.kaipokeJissekiTimes) || {};
   let time = times[dateKey];
@@ -262,7 +266,8 @@ async function jissekiBuildComment() {
     times[dateKey] = time;
     await chrome.storage.local.set({ kaipokeJissekiTimes: times });
   }
-  return { text: `${JISSEKI_NAME} ${wareki} ${time}`, dateKey, time };
+  // 3行形式（名前／日付／時刻）。既存の備考の手前に改行で追記される
+  return { text: `${JISSEKI_NAME}\n${dateStr}\n${time}`, marker: JISSEKI_NAME, dateStr, time };
 }
 
 // パネルを開いた時点で追記コメントのプレビューを表示（時刻もこの時点で確定・保存される）
@@ -270,7 +275,7 @@ async function jissekiRenderPreview() {
   try {
     const c = await jissekiBuildComment();
     document.getElementById("jissekiPreview").textContent =
-      "追記コメント：" + c.text + "\n（日付=翌日固定・同じ日は同じ時刻）";
+      "追記コメント：\n" + c.text + "\n（日付=翌日固定・同じ日は同じ時刻）";
   } catch (e) {
     document.getElementById("jissekiPreview").textContent = "コメントの準備に失敗：" + e.message;
   }
@@ -296,15 +301,30 @@ async function jissekiSend(cmd, extra = {}) {
 document.getElementById("jissekiScanBtn").addEventListener("click", async () => {
   setJissekiStatus("備考欄を探しています…", "info");
   try {
-    const r = await jissekiSend("JISSEKI_SCAN");
-    if (!r.total) {
-      setJissekiStatus("この画面に「備考」の入力欄が見つかりませんでした。\n実績の入力画面（備考欄が編集できる状態）を開いてから実行してください。\nそれでも見つからない場合は、画面を Ctrl+S でHTML保存してシステム部に解析を依頼してください。", "error");
+    const c = await jissekiBuildComment();
+    const r = await jissekiSend("JISSEKI_SCAN", { marker: c.marker, dateStr: c.dateStr });
+    if (r.screen === "helperMonthly" && !r.popupOpen) {
+      if (r.hasActualBtn) {
+        setJissekiStatus(
+          `月間シフト割当一覧を認識しました（${r.title || ""}）。${r.pager ? "\n" + r.pager : ""}\n` +
+          `備考の入力ポップアップはまだ開いていません。\n` +
+          `「② コメントを追記」を押すと、実績側の「備考」ボタンを自動でクリックして開き、追記します。\n` +
+          `（先に中身を確認したい場合は、実績側の「備考」ボタンを押してから もう一度①を押してください）`,
+          "ok"
+        );
+      } else {
+        setJissekiStatus("月間シフト割当一覧のようですが、実績側の「備考」ボタンが見つかりません。画面を再読み込み（F5）してから再実行してください。", "error");
+      }
       return;
     }
-    const groupLines = Object.entries(r.groups || {}).map(([k, v]) => `・${k}：${v}件`).join("\n");
+    if (!r.total) {
+      setJissekiStatus("この画面に「備考」の入力欄が見つかりませんでした。\n月間シフト割当一覧（従業員別の実績画面）を開いてから実行してください。\nそれでも見つからない場合は、画面を Ctrl+S でHTML保存してシステム部に解析を依頼してください。", "error");
+      return;
+    }
+    const groupLines = r.groups ? Object.entries(r.groups).map(([k, v]) => `・${k}：${v}件`).join("\n") + "\n" : "";
     const sampleLines = (r.samples || []).map((s) => `　${s.id}：「${s.value}${s.value.length >= 30 ? "…" : ""}」`).join("\n");
     setJissekiStatus(
-      `備考欄 ${r.total}件（うち追記済み ${r.already}件）\n${groupLines}\n先頭の内容（確認用）：\n${sampleLines}\n\n問題なければ「② コメントを追記」を押してください。`,
+      `備考欄 ${r.total}件（うち追記済み ${r.already}件）${r.pager ? "\n" + r.pager : ""}\n${groupLines}先頭の内容（確認用）：\n${sampleLines}\n\n問題なければ「② コメントを追記」を押してください。`,
       "ok"
     );
   } catch (e) {
@@ -312,18 +332,28 @@ document.getElementById("jissekiScanBtn").addEventListener("click", async () => 
   }
 });
 
-// ② コメントを追記（既に【サ責】が入っている欄はスキップ）
+// ② コメントを追記（同じ日付の山本コメントが既に入っている欄はスキップ）
 document.getElementById("jissekiFillBtn").addEventListener("click", async () => {
   try {
     const c = await jissekiBuildComment();
-    setJissekiStatus("追記しています…（1欄ごとに0.5〜1.5秒の間隔をあけて入力します）\n追記コメント：" + c.text, "info");
-    const r = await jissekiSend("JISSEKI_FILL", { comment: c.text });
-    setJissekiStatus(
-      `完了：追記 ${r.done}件／スキップ（追記済み）${r.already}件（対象 ${r.total}件）\n` +
-      `⚠️ 内容を目視確認のうえ、画面の「登録／保存」はご自身で押してください。\n` +
-      `次の従業員の実績画面に切り替えて、同じ手順（①→②）を繰り返してください。`,
-      "ok"
-    );
+    setJissekiStatus("追記しています…（1欄ごとに0.5〜1.5秒の間隔をあけて入力します）", "info");
+    const r = await jissekiSend("JISSEKI_FILL", { comment: c.text, marker: c.marker, dateStr: c.dateStr });
+    if (r.screen === "helperMonthly") {
+      setJissekiStatus(
+        `追記 ${r.done}件／スキップ（追記済み）${r.already}件（対象 ${r.total}件）\n` +
+        `⚠️ ポップアップの内容を目視確認のうえ、「登録する」はご自身で押してください。\n` +
+        `${r.pager ? "ページ：" + r.pager + "\n" : ""}` +
+        `複数ページある場合は、登録後に「次」でページを送って もう一度②を実行してください。\n` +
+        `終わったら次の従業員の月間シフト割当一覧に切り替えて、同じ手順を繰り返してください（同じ日は同じ時刻が入ります）。`,
+        "ok"
+      );
+    } else {
+      setJissekiStatus(
+        `完了：追記 ${r.done}件／スキップ（追記済み）${r.already}件（対象 ${r.total}件）\n` +
+        `⚠️ 内容を目視確認のうえ、画面の「登録／保存」はご自身で押してください。`,
+        "ok"
+      );
+    }
   } catch (e) {
     setJissekiStatus("停止しました：" + e.message, "error");
   }
