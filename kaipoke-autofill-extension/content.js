@@ -986,7 +986,8 @@ async function runShogai(profile, payload) {
   //   保険内: サービス種類=居宅介護/重度訪問介護
   //     居宅介護    : サービス区分=AI解析結果(serviceCategory)
   //     重度訪問介護: サービス区分=「重度訪問介護（障害支援区分６）」固定（修正は手入力）／訪問先=「居宅」固定／移動介護時間=手入力
-  //     共通        : 重複=原則「1人目」。派遣人数=2人同時作業(twoPersons)の場合のみ「2人」（通常は「-」のまま触らない）
+  //     共通        : 重複と派遣人数はどちらか1つだけ設定（MEM_0871_0010）。
+  //                   通常=重複「1人目」のみ／2人体制(twoPersons)=派遣人数「2人同時作業」のみ
   //                   資格・運転・深夜の巡回型派遣分離・事業所と同一の建物の利用者減算は触らない
   //   保険外: 【分類】=移動支援／サービス内容=「移動支援0円（1回0円）」／金額は触らない
   // 追加対象を決める：まず保険内（pending）、保険内が全て載ったら移動支援（idouPending）。
@@ -1030,8 +1031,11 @@ async function runShogai(profile, payload) {
         }
         await soft('サービス区分', cat);
       }
-      await soft('重複', '1人目');
-      if (svc.twoPersons) await soft('派遣人数', '2人');
+      // 重複と派遣人数は「どちらか1つだけ」設定できる（MEM_0871_0010・2026/07/16実機確認）。
+      // 2人体制(twoPersons)の利用者は派遣人数=「2人同時作業」のみ設定し、重複は「-」のまま触らない。
+      // 通常は重複=「1人目」のみ設定し、派遣人数は「-」のまま触らない。
+      if (svc.twoPersons) await soft('派遣人数', '2人同時作業');
+      else await soft('重複', '1人目');
     }
     // 開始・終了時間（保険内=4桁テキスト／保険外=時・分select×6 の両形式に対応）
     await fillShogaiTimes(P, svc, (s) => skipped.push(tag(s)));
@@ -1113,6 +1117,11 @@ async function fillContractQuantities(S, services, skipped) {
     if (!svc.contractSupplyQuantity) continue;
     const q = z2h(String(svc.contractSupplyQuantity)).trim();
     if (/^[0-9]+(\.[0-9]+)?$/.test(q)) {
+      // 既に数値として同じ値が入っていれば触らない。カイポケは保存時に「102」を「102.00」と
+      // 整形するため、文字列比較で書き込み直すと未保存変更（dirty）になり、サービス追加クリックで
+      // 「移動しますか？」ダイアログが出て自動処理が止まる（2026/07/16 実機で確認）
+      const cur = document.querySelector(S.supplyQty(i));
+      if (cur && String(cur.value).trim() !== '' && parseFloat(cur.value) === parseFloat(q)) continue;
       try { await fillInput(S.supplyQty(i), q, { timeout: 5000, visible: false }); } catch (_) {}
     } else {
       skipped.push(`契約支給量（${i + 1}行目）: 「${svc.contractSupplyQuantity}」は数値でないため未入力（手動で時間数を入れてください）`);
