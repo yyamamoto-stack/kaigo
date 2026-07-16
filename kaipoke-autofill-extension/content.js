@@ -1032,10 +1032,15 @@ async function runShogai(profile, payload) {
         await soft('サービス区分', cat);
       }
       // 重複と派遣人数は「どちらか1つだけ」設定できる（MEM_0871_0010・2026/07/16実機確認）。
-      // 2人体制(twoPersons)の利用者は派遣人数=「2人同時作業」のみ設定し、重複は「-」のまま触らない。
+      // ポップアップは重複=「1人目」が初期表示されることがあるため、2人体制(twoPersons)では
+      // 重複を明示的に「-」へ戻してから派遣人数=「2人同時作業」を設定する（触らないだけではNG）。
       // 通常は重複=「1人目」のみ設定し、派遣人数は「-」のまま触らない。
-      if (svc.twoPersons) await soft('派遣人数', '2人同時作業');
-      else await soft('重複', '1人目');
+      if (svc.twoPersons) {
+        await soft('重複', '-');
+        await soft('派遣人数', '2人同時作業');
+      } else {
+        await soft('重複', '1人目');
+      }
     }
     // 開始・終了時間（保険内=4桁テキスト／保険外=時・分select×6 の両形式に対応）
     await fillShogaiTimes(P, svc, (s) => skipped.push(tag(s)));
