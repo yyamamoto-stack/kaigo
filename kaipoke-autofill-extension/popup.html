@@ -132,8 +132,8 @@
   <div class="note">
     従業員別の<strong>月間シフト割当一覧</strong>を開いてから実行してください（介護保険・障害 共通）。<br>
     実績側の「備考」ボタンを自動でクリックしてポップアップを開き、
-    各備考欄の<strong>既存コメントの手前</strong>に下のコメントを追記します
-    （同じ日付の追記済み欄はスキップ）。<br>
+    各備考欄の<strong>既存コメントの手前</strong>に、その行の利用者の<strong>担当サ責名</strong>で
+    確認コメントを追記します（同じサ責・同じ日付の追記済み欄はスキップ）。<br>
     ⚠️ 追記後、ポップアップの<strong>「登録する」は必ずご自身で</strong>押してください。<br>
     複数ページある場合はページを送って再実行。従業員ごとに画面を切り替えて繰り返してください（同じ日は同じ時刻が入ります）。
   </div>
@@ -143,6 +143,13 @@
     <button id="jissekiFillBtn" class="primary" type="button">② コメントを追記</button>
   </div>
   <div id="jissekiStatus" class="status-info" style="margin-top:8px; font-size:12px; white-space:pre-wrap;"></div>
+
+  <!-- 利用者→担当サ責の対応表（利用者売上表のAS列「担当者」に基づく。担当変更時はここを編集） -->
+  <label for="jissekiTantou" style="display:block; margin-top:10px; font-size:12px; font-weight:bold;">
+    利用者 → 担当サ責 対応表（1行に「利用者名：サ責名」。編集すると自動保存）
+  </label>
+  <textarea id="jissekiTantou" style="height:14vh; min-height:70px;"
+    placeholder="例）佐藤伸治：石原裕子"></textarea>
 
   <!-- 外部スクリプトは読み込まず、popup.js のみ（CSP準拠） -->
   <script src="popup.js"></script>

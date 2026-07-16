@@ -1270,12 +1270,80 @@ function jissekiPagerText() {
   return p ? (p.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
 }
 
-// 追記済み判定：【サ責】山本禎典＋同じ日付が既に入っていればスキップ
-// （他のサ責のコメントが入っていても山本さんの確認コメントは追記する）
+// 追記済み判定：同じサ責名＋同じ日付が既に入っていればスキップ
+// （他のサ責のコメントが入っていても、その行の担当サ責のコメントは追記する）
 function jissekiAlreadyDone(value, marker, dateStr) {
   const v = String(value || '');
   if (marker) return v.indexOf(marker) >= 0 && (!dateStr || v.indexOf(dateStr) >= 0);
   return JISSEKI.markerRe.test(v); // markerが渡されない場合の保険
+}
+
+// -------------------------------------------------------------
+// 行→利用者→担当サ責 の解決（v2.19.0）
+// 備考ポップアップの行には利用者名が無い（日付/曜日/サービス内容/保険区分/備考のみ）。
+// メイン一覧（#tableData）の実績側セル（colum_middleより後ろ）から
+// 「日付|サービス内容+時間|保険区分」→利用者名 の索引を作り、ポップアップ行と突き合わせる。
+// 担当サ責名は popup.js から渡される対応表（利用者売上表のAS列由来）で引く。
+// -------------------------------------------------------------
+function jissekiRowKey(dateText, svcText, hokenText) {
+  return norm(dateText) + '|' + norm(svcText) + '|' + norm(hokenText);
+}
+
+// メイン一覧から 実績行キー → 利用者名Set の索引を作る
+function jissekiActualUserIndex() {
+  const map = new Map();
+  const table = document.querySelector('#tableData');
+  if (!table) return map;
+  let curDate = ''; // 日付セルがrowspanで省略される行に備えて直前の日付を引き継ぐ
+  for (const tr of Array.from(table.rows || [])) {
+    const tds = Array.from(tr.cells || []);
+    const first = tds.find((td) => (td.className || '').indexOf('colum_first') >= 0);
+    if (first) curDate = (first.textContent || '').trim();
+    const midIdx = tds.findIndex((td) => (td.className || '').indexOf('colum_middle') >= 0);
+    if (midIdx < 0) continue;
+    const after = tds.slice(midIdx + 1); // ここから右が【実績】側
+    const svc = after.find((td) => (td.className || '').indexOf('colum02') >= 0);
+    const user = after.find((td) => (td.className || '').indexOf('colum03') >= 0);
+    const hoken = after.find((td) => (td.className || '').indexOf('colum04') >= 0);
+    if (!svc || !user) continue;
+    const uname = (user.textContent || '').trim();
+    if (!uname || uname === '-') continue;
+    const key = jissekiRowKey(curDate, svc.textContent, hoken ? hoken.textContent : '');
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key).add(uname);
+  }
+  return map;
+}
+
+// ポップアップの1行（textareaの行）から行キーを作る
+function jissekiPopupRowKey(el) {
+  const tr = el.closest('tr');
+  if (!tr) return null;
+  const tds = Array.from(tr.cells || []);
+  const date = tds.find((td) => (td.className || '').indexOf('colum01') >= 0);
+  const svc = tds.find((td) => (td.className || '').indexOf('colum03') >= 0);
+  const hoken = tds.find((td) => (td.className || '').indexOf('colum04') >= 0);
+  if (!date || !svc) return null;
+  return { key: jissekiRowKey(date.textContent, svc.textContent, hoken ? hoken.textContent : ''), dateLabel: (date.textContent || '').trim() };
+}
+
+// ポップアップの各備考欄について {el, user, tantou, reason} を解決する
+// mapping = [[利用者名, 担当サ責名], ...]（popup.jsから受領）
+function jissekiResolveFields(mapping) {
+  const tantouByUser = {};
+  (mapping || []).forEach(([u, t]) => { if (u && t) tantouByUser[norm(u)] = String(t).trim(); });
+  const userIndex = jissekiActualUserIndex();
+  return jissekiPopupFields().map((el) => {
+    const rk = jissekiPopupRowKey(el);
+    if (!rk) return { el, reason: '行情報が読めない' };
+    const users = userIndex.get(rk.key);
+    if (!users || users.size === 0) return { el, dateLabel: rk.dateLabel, reason: `一覧に対応する実績行が見つからない（${rk.dateLabel}日）` };
+    if (users.size > 1) return { el, dateLabel: rk.dateLabel, reason: `同時刻に複数利用者（${Array.from(users).join('・')}）で特定不能（${rk.dateLabel}日）` };
+    const user = Array.from(users)[0];
+    const tantou = tantouByUser[norm(user)];
+    if (!tantou) return { el, user, dateLabel: rk.dateLabel, reason: `対応表に利用者「${user}」がない` };
+    return { el, user, tantou, dateLabel: rk.dateLabel };
+  });
 }
 
 // 書き込んでよい欄か（表示中・編集可のテキスト欄のみ）
@@ -1326,36 +1394,40 @@ function jissekiCollectFields() {
 }
 
 // スキャン結果の要約（popupに表示する）
-function jissekiScanSummary(marker, dateStr) {
+function jissekiScanSummary(mapping, dateStr) {
   // ---- 月間シフト割当一覧（実DOM確定済みのメイン対応画面） ----
   if (jissekiIsHelperMonthly()) {
-    const fields = jissekiPopupFields();
     const base = { screen: 'helperMonthly', title: document.title, pager: jissekiPagerText() };
-    if (!fields.length) {
+    if (!jissekiPopupFields().length) {
       // ポップアップ未オープン。実績側「備考」ボタンの有無だけ確認して返す
       return { ...base, popupOpen: false, total: 0, already: 0,
         hasActualBtn: !!document.querySelector(JISSEKI.sel.actualRemarkBtn) };
     }
+    const resolved = jissekiResolveFields(mapping);
     let already = 0;
-    fields.forEach((el) => { if (jissekiAlreadyDone(el.value, marker, dateStr)) already++; });
-    const samples = fields.slice(0, 5).map((el) => ({
-      id: el.id, value: String(el.value || '').replace(/\n/g, '␍').slice(0, 30),
+    const perTantou = {};
+    const warnings = [];
+    resolved.forEach((r) => {
+      if (r.reason) { warnings.push(r.reason); return; }
+      perTantou[r.tantou] = (perTantou[r.tantou] || 0) + 1;
+      if (jissekiAlreadyDone(r.el.value, '【サ責】' + r.tantou, dateStr)) already++;
+    });
+    const samples = resolved.slice(0, 5).map((r) => ({
+      id: (r.dateLabel ? r.dateLabel + '日' : '?') + (r.user ? ' ' + r.user : '') + (r.tantou ? '→' + r.tantou : ''),
+      value: String(r.el.value || '').replace(/\n/g, '␍').slice(0, 25),
     }));
-    return { ...base, popupOpen: true, total: fields.length, already, samples };
+    return { ...base, popupOpen: true, total: resolved.length, already, perTantou,
+      warnings: Array.from(new Set(warnings)), samples };
   }
-  // ---- 汎用フォールバック（他の実績画面用） ----
+  // ---- 汎用フォールバック（他の実績画面の様子見用。書き込みは月間シフト割当一覧のみ対応） ----
   const fields = jissekiCollectFields();
   const groups = {};
-  let already = 0;
-  fields.forEach((f) => {
-    groups[f.source] = (groups[f.source] || 0) + 1;
-    if (jissekiAlreadyDone(f.el.value, marker, dateStr)) already++;
-  });
+  fields.forEach((f) => { groups[f.source] = (groups[f.source] || 0) + 1; });
   const samples = fields.slice(0, 5).map((f) => ({
     id: f.el.id || f.el.name || '(idなし)',
     value: String(f.el.value || '').replace(/\n/g, '␍').slice(0, 30),
   }));
-  return { screen: 'generic', total: fields.length, already, groups, samples, title: document.title };
+  return { screen: 'generic', total: fields.length, already: 0, groups, samples, title: document.title };
 }
 
 // 1つの備考欄へコメントを先頭追記する（focus→入力→blur。blurでページ本来のajaxSingleが走り確定する）
@@ -1368,59 +1440,44 @@ async function jissekiPrepend(el, comment) {
 }
 
 // コメントを各備考欄の先頭へ追記する。
-async function jissekiFillRemarks(comment, marker, dateStr) {
-  // ---- 月間シフト割当一覧（実DOM確定済みのメイン対応画面） ----
-  if (jissekiIsHelperMonthly()) {
-    let fields = jissekiPopupFields();
-    if (!fields.length) {
-      // ポップアップが閉じている→【実績】側の「備考」ボタンをクリックして開く（画面上の通常ボタン操作）
-      const btn = await waitForElement(JISSEKI.sel.actualRemarkBtn, { timeout: 8000 }).catch(() => null);
-      if (!btn) {
-        throw new Error('実績側の「備考」ボタンが見つかりませんでした。月間シフト割当一覧（従業員別の実績画面）を開いた状態で実行してください。');
-      }
-      await humanSleep();
-      safeClick(btn);
-      // ajaxで備考ポップアップ（A25_layout）が開き、入力欄が描画されるのを待つ
-      await waitForElement(JISSEKI.sel.popupTextareas, { timeout: 15000 });
-      await sleep(800);
-      fields = jissekiPopupFields();
-    }
-    if (!fields.length) {
-      throw new Error('備考ポップアップは開きましたが、入力欄が0件でした。この月・このページに実績の行が無い可能性があります。');
-    }
-    let done = 0, already = 0;
-    for (const el of fields) {
-      if (jissekiAlreadyDone(el.value, marker, dateStr)) { already++; continue; } // 同じ日付の山本コメントは二重追記しない
-      await jissekiPrepend(el, comment);
-      done++;
-    }
-    const result = { screen: 'helperMonthly', total: fields.length, done, already, needRegist: true, pager: jissekiPagerText() };
-    try { chrome.storage.local.set({ kaipokeJissekiLast: { ...result, title: document.title, ts: Date.now() } }); } catch (_) {}
-    return result; // 「登録する」（btnPopupRegist）は自動では押さない＝人が押す（claude.md 4章）
+// 行ごとに利用者を特定し、その担当サ責名で「【サ責】担当者名\n日付\n時刻」を組み立てる。
+async function jissekiFillRemarks(mapping, dateStr, time) {
+  if (!jissekiIsHelperMonthly()) {
+    throw new Error('この画面は月間シフト割当一覧ではありません。' +
+      'サ責コメントの追記は、従業員別の「月間シフト割当一覧」画面でのみ実行できます。');
   }
-  // ---- 汎用フォールバック（他の実績画面用） ----
-  const fields = jissekiCollectFields();
-  if (!fields.length) {
-    throw new Error('この画面に「備考」の入力欄が見つかりませんでした。' +
-      '月間シフト割当一覧などの実績画面を開いてから実行してください。' +
-      'それでも見つからない場合は、この画面を Ctrl+S でHTML保存してシステム部に解析を依頼してください。');
+  if (!Array.isArray(mapping) || !mapping.length) {
+    throw new Error('利用者→担当サ責の対応表が空です。サイドパネルの対応表欄を入力してください。');
+  }
+  if (!jissekiPopupFields().length) {
+    // ポップアップが閉じている→【実績】側の「備考」ボタンをクリックして開く（画面上の通常ボタン操作）
+    const btn = await waitForElement(JISSEKI.sel.actualRemarkBtn, { timeout: 8000 }).catch(() => null);
+    if (!btn) {
+      throw new Error('実績側の「備考」ボタンが見つかりませんでした。月間シフト割当一覧（従業員別の実績画面）を開いた状態で実行してください。');
+    }
+    await humanSleep();
+    safeClick(btn);
+    // ajaxで備考ポップアップ（A25_layout）が開き、入力欄が描画されるのを待つ
+    await waitForElement(JISSEKI.sel.popupTextareas, { timeout: 15000 });
+    await sleep(800);
+  }
+  const resolved = jissekiResolveFields(mapping);
+  if (!resolved.length) {
+    throw new Error('備考ポップアップは開きましたが、入力欄が0件でした。この月・このページに実績の行が無い可能性があります。');
   }
   let done = 0, already = 0;
-  for (const f of fields) {
-    if (jissekiAlreadyDone(f.el.value, marker, dateStr)) { already++; continue; }
-    if (f.el.tagName === 'TEXTAREA') {
-      await jissekiPrepend(f.el, comment);
-    } else {
-      const cur = String(f.el.value || '');
-      setNativeValue(f.el, comment.replace(/\n/g, ' ') + (cur ? ' ' + cur : '')); // 1行入力欄は改行を空白に
-      f.el.dispatchEvent(new FocusEvent('blur'));
-      await humanSleep();
-    }
+  const warnings = [];
+  for (const r of resolved) {
+    if (r.reason) { warnings.push(r.reason + '→手動で入力してください'); continue; } // 特定できない行は触らない（フェイルセーフ）
+    const marker = '【サ責】' + r.tantou;
+    if (jissekiAlreadyDone(r.el.value, marker, dateStr)) { already++; continue; } // 同じサ責・同じ日付は二重追記しない
+    await jissekiPrepend(r.el, marker + '\n' + dateStr + '\n' + time);
     done++;
   }
-  const result = { screen: 'generic', total: fields.length, done, already };
+  const result = { screen: 'helperMonthly', total: resolved.length, done, already,
+    warnings: Array.from(new Set(warnings)), needRegist: true, pager: jissekiPagerText() };
   try { chrome.storage.local.set({ kaipokeJissekiLast: { ...result, title: document.title, ts: Date.now() } }); } catch (_) {}
-  return result;
+  return result; // 「登録する」（btnPopupRegist）は自動では押さない＝人が押す（claude.md 4章）
 }
 
 // =============================================================
@@ -1441,12 +1498,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       // ---- 実績備考（計画書のPROFILE判定より前に処理：実績画面はPROFILE=nullのため） ----
       if (message.cmd === 'JISSEKI_SCAN') {
-        sendResponse({ ok: true, ...jissekiScanSummary(message.marker, message.dateStr) });
+        sendResponse({ ok: true, ...jissekiScanSummary(message.mapping, message.dateStr) });
         return;
       }
       if (message.cmd === 'JISSEKI_FILL') {
-        if (!message.comment || !String(message.comment).trim()) throw new Error('追記するコメントが空です。');
-        const r = await jissekiFillRemarks(String(message.comment), message.marker, message.dateStr);
+        if (!message.dateStr || !message.time) throw new Error('追記する日付・時刻が空です。');
+        const r = await jissekiFillRemarks(message.mapping, String(message.dateStr), String(message.time));
         sendResponse({ ok: true, ...r });
         return;
       }
