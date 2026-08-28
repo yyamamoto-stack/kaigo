@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <!-- ポップアップUI。JSONを貼り付けて実行するだけのシンプルな画面 -->
+  <title>カイポケ自動入力</title>
+  <style>
+    /* 拡張機能ポップアップの最小限のスタイル（外部CSSは読み込まない） */
+    body {
+      font-family: "Hiragino Sans", "Meiryo", sans-serif;
+      /* サイドパネル表示：幅はパネル幅に追従（境界ドラッグで調整可）・高さは画面いっぱい */
+      width: auto;
+      min-width: 300px;
+      margin: 0;
+      padding: 12px;
+      font-size: 13px;
+      color: #222;
+    }
+    h1 {
+      font-size: 15px;
+      margin: 0 0 8px;
+    }
+    .note {
+      background: #fff8e1;
+      border: 1px solid #ffe082;
+      border-radius: 6px;
+      padding: 8px;
+      margin-bottom: 10px;
+      line-height: 1.5;
+      font-size: 12px;
+    }
+    textarea {
+      width: 100%;
+      height: 20vh; /* 画面の2割。下辺ドラッグで自由に伸縮可能 */
+      min-height: 90px;
+      box-sizing: border-box;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      resize: vertical;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    button {
+      flex: 1;
+      padding: 8px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #f5f5f5;
+    }
+    button.primary {
+      background: #1976d2;
+      color: #fff;
+      border-color: #1565c0;
+      font-weight: bold;
+    }
+    #status {
+      margin-top: 10px;
+      min-height: 18px;
+      font-size: 12px;
+      white-space: pre-wrap;
+    }
+    .status-error { color: #c62828; }
+    .status-ok { color: #2e7d32; }
+    .status-info { color: #555; }
+    .status-pause { color: #1565c0; }
+    /* 工程リスト（プラン）：済み=取り消し線／実行中=青太字／エラー=赤 */
+    #stepsWrap { margin-top: 10px; display: none; }
+    #stepsTitle { font-size: 12px; font-weight: bold; color: #333; margin-bottom: 4px; }
+    #planSteps {
+      margin: 0; padding: 6px 8px; list-style: none;
+      background: #fafafa; border: 1px solid #e0e0e0; border-radius: 6px;
+      font-size: 12px; line-height: 1.8;
+      /* 縦長のサイドパネルでは全工程をスクロールなしで見せる（収まらない場合のみスクロール） */
+      max-height: 45vh; overflow-y: auto;
+    }
+    .step-done { color: #999; text-decoration: line-through; }
+    .step-run { color: #1565c0; font-weight: bold; }
+    .step-error { color: #c62828; font-weight: bold; }
+    .step-warn { color: #e65100; }
+    .step-todo { color: #333; }
+    /* 実績備考の結果表示：結論と対象箇所は黒太字で大きく、補足は小さくグレーで */
+    .jisseki-head { font-weight: bold; color: #000; font-size: 14px; margin: 2px 0 6px; }
+    .jisseki-strong { font-weight: bold; color: #000; font-size: 13px; line-height: 1.7; }
+    .jisseki-detail { color: #888; font-size: 11px; line-height: 1.6; margin-top: 6px; }
+    .jisseki-warn { color: #e65100; font-size: 12px; font-weight: bold; margin-top: 4px; }
+    /* 実績備考セクション：カード型にまとめて計画書機能と視覚的に分離 */
+    .jisseki-card {
+      background: #f7faff;
+      border: 1px solid #c9dcf3;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-top: 14px;
+    }
+    .jisseki-card h1 { margin: 0 0 8px; }
+    .jisseki-dates { display: flex; gap: 8px; margin-bottom: 8px; }
+    .jisseki-dates label { flex: 1; font-size: 11px; color: #555; }
+    .jisseki-dates input[type="date"] {
+      width: 100%; box-sizing: border-box; padding: 6px 4px; margin-top: 2px;
+      border: 1px solid #bbb; border-radius: 6px; font-size: 13px;
+    }
+    #jissekiPreview {
+      font-size: 12px; font-weight: bold; color: #000;
+      background: #fff; border: 1px dashed #9db9dd; border-radius: 6px;
+      padding: 6px 8px; margin-bottom: 8px; white-space: pre-wrap; line-height: 1.7;
+    }
+    .jisseki-card details { margin-top: 8px; }
+    .jisseki-card summary {
+      cursor: pointer; font-size: 11px; color: #666; user-select: none;
+    }
+    .jisseki-card details .note { margin: 6px 0 0; }
+    #jissekiTantou { height: 14vh; min-height: 70px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h1>カイポケ 訪問介護計画書 自動入力</h1>
+
+  <!-- 免責・注意事項。最終登録は必ず人間が行うことを明記 -->
+  <div class="note">
+    ⚠️ 自動入力は「下書き」までを行います。<br>
+    入力後は<strong>必ず目視で内容を確認</strong>し、<strong>作成状態を「作成済」にしてから
+    ご自身で「登録する」を押してください</strong>。<br>
+    ⚠️ サービス設定は<strong>別ウィンドウ（ポップアップ）</strong>で開きます。
+    ブロックされないよう許可してください。<br>
+    自動化による誤登録は免責事項です。
+  </div>
+
+  <!-- JSONデータの貼り付け欄。basicInfo と services を持つ階層構造 -->
+  <label for="jsonInput">JSONデータ（basicInfo / services）</label>
+  <textarea id="jsonInput" placeholder='{&#10;  "basicInfo": { ... },&#10;  "services": [ ... ]&#10;}'></textarea>
+
+  <div class="row">
+    <button id="clearBtn" type="button">JSONをクリア</button>
+    <button id="runBtn" class="primary" type="button">自動入力を実行</button>
+  </div>
+
+  <!-- 進捗表示（background からの PROGRESS 通知で更新。アイコンバッジにも同じ％が出る） -->
+  <div id="progressWrap" style="display:none; margin-top:10px;">
+    <div id="progressLabel" style="font-size:12px; color:#555; margin-bottom:4px;"></div>
+    <div style="background:#eee; border-radius:6px; height:10px; overflow:hidden;">
+      <div id="progressBar" style="background:#1976d2; height:100%; width:0%; transition:width .3s;"></div>
+    </div>
+  </div>
+
+  <!-- 工程リスト（プラン）：実行前に全工程を表示し、済んだ工程から取り消し線が引かれる -->
+  <div id="stepsWrap">
+    <div id="stepsTitle">実行プラン（✓済み／▶実行中／✗エラー／⚠要手動）</div>
+    <ol id="planSteps"></ol>
+  </div>
+
+  <div id="status" class="status-info"></div>
+
+  <!-- ============================================================
+       実績の備考へ サ責確認コメントを一括追記（介護保険・障害 共通）
+       ①スキャン＝読み取りのみで件数を確認 → ②追記 の二段階（フェイルセーフ）
+       ============================================================ -->
+  <div class="jisseki-card">
+    <h1>実績備考：サ責「見ました」記録</h1>
+
+    <!-- 対象の作業日（この日の実績のコメントに追記する）。既定＝①今日・②空 -->
+    <div class="jisseki-dates">
+      <label>対象の作業日
+        <input type="date" id="jissekiDate1">
+      </label>
+      <label>作業日②（普段は空のまま）
+        <input type="date" id="jissekiDate2">
+      </label>
+    </div>
+
+    <div id="jissekiPreview">追記コメントを準備中…</div>
+
+    <div class="row" style="margin-top:0;">
+      <button id="jissekiScanBtn" type="button">① 確認する</button>
+      <button id="jissekiFillBtn" class="primary" type="button">② 追記する</button>
+    </div>
+    <div id="jissekiStatus" class="status-info" style="margin-top:8px; font-size:12px; white-space:pre-wrap;"></div>
+
+    <details>
+      <summary>使い方・注意</summary>
+      <div class="note">
+        <strong>月間シフト割当一覧</strong>を開いて実行（介護保険・障害 共通）。
+        対象は<strong>上の作業日の分でコメントが入っている行のみ</strong>。それ以外には触りません。<br>
+        ⚠️ 追記後、ポップアップの<strong>「登録する」は必ずご自身で</strong>押してください。
+        従業員ごとに画面を切り替えて繰り返します（同じ日は同じ時刻が入ります）。
+      </div>
+    </details>
+
+    <!-- 利用者→担当サ責の対応表（利用者売上表のAS列「担当者」に基づく。担当変更時はここを編集） -->
+    <details>
+      <summary>利用者 → 担当サ責 対応表（初回に貼り付け・編集すると自動保存）</summary>
+      <textarea id="jissekiTantou" placeholder="例）佐藤伸治：石原裕子（1行に1人）"></textarea>
+    </details>
+  </div>
+
+  <!-- 外部スクリプトは読み込まず、popup.js のみ（CSP準拠） -->
+  <script src="popup.js"></script>
+</body>
+</html>
